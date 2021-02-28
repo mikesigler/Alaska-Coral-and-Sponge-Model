@@ -1,0 +1,111 @@
+---
+title: "Gulf of Alaska survey planning"
+author: "Mike Sigler"
+date: "2/27/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+library(PerformanceAnalytics)
+library(ggfortify)
+library("sf")
+library("rnaturalearth")          #provides a map of countries of the entire world
+library("rnaturalearthdata")
+```
+
+### read data
+```{r, echo=FALSE}
+rm(list = ls())
+
+# Variables of interest (stored in rasters), average annual values, right? CHRIS
+# Bathy - depth
+# Bcurrent - current with tidal effect removed
+# Btemp - bottom temperature
+# Color - surface ocean color
+# Slope - slope
+# Tmax - maximum tidal current 
+# RockCobble - proportion of rock or cobble habitat 
+
+# set project directories
+projdir         <- "D:\\Documents\\AK Coral and Sponge Model\\"
+projdir.dat     <- "D:\\Documents\\AK Coral and Sponge Model\\Camera data\\"
+projdir.results <- "D:\\Documents\\AK Coral and Sponge Model\\Results\\"
+
+# read final version
+mydata <- as_tibble(read.csv(paste(projdir,"Location.DSCS.variables.csv",sep=""))) 
+variables <- c("Bathy","Bcurrent","Btemp","Color","Slope","Tmax","RockCobble") # update variable names
+Species.List.DSCS <- select(as_tibble(read.csv(paste(projdir,"Species.List.DSCS.csv",sep=""))),-X)
+```
+
+### select Gulf of Alaska data
+```{r, echo=FALSE}
+mydata %>%
+  filter(Start_long>=-170 & Start_long<0 & region!="EBS") ->
+  mydata.GOA
+nrow(mydata.GOA)
+```
+
+### Map and scatter plot of existing sample locations
+```{r, echo=FALSE}
+  world <- ne_countries(scale = "medium", returnclass = "sf") # call map data
+  ggplot(data = world) +
+    geom_sf() +
+    geom_point(
+      data = mydata.GOA,         #calls location data
+      aes(
+        x= Start_long,
+        y = Start_lat),
+      size = 1, 
+      shape = "circle", 
+      colour = "red") +   
+    coord_sf(
+      xlim = c(-170,-130),      # map boundaries    
+      ylim = c(52,60.5), 
+      expand = FALSE) +
+    labs(x="Longitude",y="Latitude") ->
+    p1
+  p1
+  
+# Scatter plot by longitude and depth  
+ mydata.GOA %>%                                                # start with GOA data
+    ggplot(aes(x=Start_long,y=Depth)) +             # plot longitude and depth
+    geom_point(col="red") + 
+    labs(x="Longitude",y="Depth (m)") +
+    scale_y_reverse() ->
+   p2
+  p2
+```
+
+### Bar plots of taxa by depth and longitude
+```{r, echo=FALSE}
+# by depth
+ mydata.GOA %>%                                                            # start with GOA data
+    gather(key=Species.standard,value=Density,Acanthogorgia.sp:Porifera) %>%    # reformat data
+    left_join(Species.List.DSCS,by="Species.standard") %>%                 # add family names
+    filter (Density>0) %>%                                           # include only non-zero densities
+    ggplot(aes(x=reorder(Species.standard,Depth,median),y=Depth,fill=Family)) + # plot depth by species 
+                                                                           # and color by family
+    geom_boxplot() +
+    labs(y="Depth (m)",x="Taxa") +
+    theme(axis.text.x = element_text(angle=90, vjust=0.5, hjust=1)) +
+    coord_flip() -> p1
+  p1
+
+# by longitude
+ mydata.GOA %>%                                                            # start with GOA data
+    gather(key=Species.standard,value=Density,Acanthogorgia.sp:Porifera) %>%    # reformat data
+    left_join(Species.List.DSCS,by="Species.standard") %>%                 # add family names
+    filter (Density>0) %>%                                           # include only non-zero densities
+    ggplot(aes(x=reorder(Species.standard,Start_long,median),y=Start_long,fill=Family)) + # plot lon by 
+                                                                           # species and color by family
+    geom_boxplot() +
+    labs(y="Longitude",x="Taxa") +
+    theme(axis.text.x = element_text(angle=90, vjust=0.5, hjust=1)) +
+    coord_flip() -> p2
+  p2
+```
