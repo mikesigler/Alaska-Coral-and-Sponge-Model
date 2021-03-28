@@ -1,0 +1,221 @@
+---
+title: "Match variables (e.g., depth) and substrate data with the camera data"
+author: "Mike Sigler"
+date: "3/25/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(raster)
+library(sp)
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+library(PerformanceAnalytics)
+library(ggfortify)
+```
+
+### Load independent variables (rasters, e.g., depth), which are based on maps rather than camera data
+```{r,echo=FALSE,cache=TRUE}
+rm(list = ls())
+# Variables of interest (stored in rasters), average annual values
+# Bathy - depth
+# Bcurrent - current with tidal effect removed
+# Btemp - bottom temperature
+# Color - surface ocean color
+# Slope - slope
+# Tmax - maximum tidal current 
+
+# set project directories
+projdir         <- "D:\\Documents\\Alaska-Coral-and-Sponge-Model\\"
+projdir.dat     <- "D:\\Documents\\Alaska-Coral-and-Sponge-Model\\results\\"
+projdir.AI      <- "D:\\Documents\\AK Coral and Sponge Model\\Variables_AI_1km_1000m\\"
+projdir.EBS     <- "D:\\Documents\\AK Coral and Sponge Model\\Variables_EBS_1km\\"
+projdir.GOA     <- "D:\\Documents\\AK Coral and Sponge Model\\Variables_GOA_1km\\"
+projdir.results <- "D:\\Documents\\Alaska-Coral-and-Sponge-Model\\results\\"
+
+# set projection
+newproj<-"+proj=aea +lat_1=50 +lat_2=58.5 +lat_0=45 +lon_0=-126 +x_0=1000000 +y_0=0 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs"
+
+# import rasters
+variables <- c("Bathy","Bcurrent","Btemp","Color","Slope","Tmax")   # raster (variable) names
+nvar <- length(variables)                                           # number of variables
+areas <- c("AI","EBS","GOA")                                        # number of areas
+
+# Aleutian Islands
+for (j in 1:nvar) {
+  temp1<-raster(paste(projdir.AI,variables[j],sep=""))                          # load each raster
+  temp2<-projectRaster(temp1,crs=newproj,progress="text")                       # convert the projection
+  assign(paste(variables[j],".",areas[1],".","projected",sep=""),temp2)         # assign raster name
+}
+raster.stack.AI<-stack(Bathy.AI.projected,Bcurrent.AI.projected,Btemp.AI.projected, # stack the rasters
+                       Color.AI.projected,Slope.AI.projected,Tmax.AI.projected)
+names(raster.stack.AI) <- variables                                       # name the rasters in the stack
+plot(raster.stack.AI)                                                     # plot each raster
+
+# Eastern Bering Sea 
+for (j in 1:nvar) {
+  temp1<-raster(paste(projdir.EBS,variables[j],sep=""))                         # load the raster
+  temp2<-projectRaster(temp1,crs=newproj,progress="text")                       # convert the projection
+  assign(paste(variables[j],".",areas[2],".","projected",sep=""),temp2)         # assign raster name
+}
+raster.stack.EBS<-stack(Bathy.EBS.projected,Bcurrent.EBS.projected,Btemp.EBS.projected, # stack the rasters
+                       Color.EBS.projected,Slope.EBS.projected,Tmax.EBS.projected)
+names(raster.stack.EBS) <- variables                                             # name the rasters 
+plot(raster.stack.EBS)                                                           # plot each raster
+
+# Gulf of Alaska
+for (j in 1:nvar) {
+  temp1<-raster(paste(projdir.GOA,variables[j],sep=""))                          # load the raster
+  temp2<-projectRaster(temp1,crs=newproj,progress="text")                        # convert the projection
+  assign(paste(variables[j],".",areas[3],".","projected",sep=""),temp2)          # assign raster name
+}
+raster.stack.GOA<-stack(Bathy.GOA.projected,Bcurrent.GOA.projected,Btemp.GOA.projected, # stack the rasters
+                       Color.GOA.projected,Slope.GOA.projected,Tmax.GOA.projected)
+names(raster.stack.GOA) <- variables                                             # name the rasters 
+plot(raster.stack.GOA)                                                           # plot each raster
+```
+
+### Load the camera data and match with the independent variables (rasters)
+```{r,echo=FALSE,cache=TRUE}
+Location.DSCS <- as_tibble(read.csv(paste(projdir.results,"Location.DSCS.csv",sep="")))  # load the data 
+
+# select sample locations by region, transform to a shape object, check overlay, extract raster values and bind to original data
+# Aleutian Islands
+Location.DSCS %>%
+  filter(region == "AI") ->
+  Location.DSCS.AI
+Location.AI <- data.frame(lon=Location.DSCS.AI$Start_long,lat=Location.DSCS.AI$Start_lat)   # identify data
+Location.AI <- SpatialPoints(Location.AI,proj4string=CRS("+proj=longlat +datum=WGS84"))     # create a list of the points
+Location.AI.projected <- spTransform(Location.AI,crs(newproj))                  # add projection
+plot(raster.stack.AI[[1]])                                                      # plot projection
+plot(Location.AI.projected,add=TRUE)                                            # check overlay
+AI.extract<-raster::extract(raster.stack.AI,Location.AI.projected)              # extract raster values
+Location.DSCS.AI<-cbind(Location.DSCS.AI,AI.extract)                            # bind to the original data
+
+##########################################################
+# Problem with Bathy and Tmx returning NA for some samples
+#   when other variables existed
+#   corrected with Aleutian raster revisions from Chris
+Location.DSCS.AI %>%
+  filter(is.na(Tmax)) ->        # select Tmax NA values 
+  test.AI
+nrow(test.AI)                   # none
+Location.DSCS.AI %>%
+  filter(is.na(Bathy)) ->       # select Bathy NA values
+  test.AI
+nrow(test.AI)                   # none
+
+# Problem with some sample locations occurring deeper than AI raster
+#   corrected with raster revisions
+Location.DSCS.AI %>%
+  filter(is.na(Bcurrent)) ->      # all sample locations now within rasters 
+  test.AI
+nrow(test.AI)                     #  0 records ==> no records outside raster due to depth
+############################################################################################################ Eastern Bering Sea
+Location.DSCS %>%
+  filter(region == "EBS") ->
+  Location.DSCS.EBS
+Location.EBS <- data.frame(lon=Location.DSCS.EBS$Start_long,lat=Location.DSCS.EBS$Start_lat) # identify data
+Location.EBS <- SpatialPoints(Location.EBS,proj4string=CRS("+proj=longlat +datum=WGS84"))  # create a list of the points
+Location.EBS.projected <- spTransform(Location.EBS,crs(newproj))                # add projection
+plot(raster.stack.EBS[[1]])                                                     # plot projection
+plot(Location.EBS.projected,add=TRUE)                                           # check overlay
+EBS.extract<-raster::extract(raster.stack.EBS,Location.EBS.projected)           # extract raster values
+Location.DSCS.EBS<-cbind(Location.DSCS.EBS,EBS.extract)                         # bind to the original data
+
+Location.DSCS.EBS %>%
+  filter(!is.na(Bcurrent)) ->       # check for NA values 
+  test.EBS
+nrow(Location.DSCS.EBS)             # 250 records
+nrow(test.EBS)                      # 250 records ==> all records inside raster
+
+# Gulf of Alaska
+Location.DSCS %>%
+  filter(region == "GOA") ->
+  Location.DSCS.GOA
+Location.GOA <- data.frame(lon=Location.DSCS.GOA$Start_long,lat=Location.DSCS.GOA$Start_lat) # identify data
+Location.GOA <- SpatialPoints(Location.GOA,proj4string=CRS("+proj=longlat +datum=WGS84"))     # create a list of the points
+Location.GOA.projected <- spTransform(Location.GOA,crs(newproj))                    # add projection
+plot(raster.stack.GOA[[1]])                                                         # plot projection
+plot(Location.GOA.projected,add=TRUE)                                               # check overlay
+GOA.extract<-raster::extract(raster.stack.GOA,Location.GOA.projected)               # extract raster values
+Location.DSCS.GOA<-cbind(Location.DSCS.GOA,GOA.extract)
+
+Location.DSCS.GOA %>%
+  filter(is.na(Bcurrent)) ->       # check for NA values 
+  test.GOA
+nrow(Location.DSCS.GOA)             # 340 records
+nrow(test.GOA)                      #  47 records ==> some records outside raster (test.GOA identifies the NA values)
+                        # bathymetry clipped at 1000 m
+                        # some of the GOA samples fall outside the GOA raster, yet are east of 170 deg W
+                                    # i.e., within the defintion of GOA
+min(test.GOA$Start_long);max(test.GOA$Start_long)
+# [1] -169.4536
+# [1] -162.9596
+
+# remove columns with NA values (for Bathy, etc)
+test.GOA %>%
+  select(-all_of(variables)) ->
+  test.GOA
+
+# match the Gulf of Alaska NA values to the Aleutians rasters, which extends east of 170 deg W
+Location.testGOA <- data.frame(lon=test.GOA$Start_long,lat=test.GOA$Start_lat)  # identify data
+Location.testGOA <- SpatialPoints(Location.testGOA,proj4string=CRS("+proj=longlat +datum=WGS84")) # create a list of the points
+Location.testGOA.projected <- spTransform(Location.testGOA,crs(newproj))    # add projection
+plot(raster.stack.AI[[1]])                                                  # plot projection
+plot(Location.testGOA.projected,add=TRUE)                                   # check overlay
+testGOA.extract<-raster::extract(raster.stack.AI,Location.testGOA.projected)# extract raster values
+Location.DSCS.testGOA<-cbind(test.GOA,testGOA.extract)
+
+Location.DSCS.testGOA %>%
+  filter(is.na(Bcurrent)) ->       # check for NA values 
+  test2.GOA
+nrow(Location.DSCS.testGOA)        # 47 records
+nrow(test2.GOA)                    #  2 records ==> some records remain outside raster 
+test2.GOA$Start_long               # -162.9954 -162.9596
+test2.GOA$Depth                    # 106.6969 116.5106
+test2.GOA$Start_lat                # 54.93044 54.91059
+# CHRIS, these two samples still are missed by both AI and GOA rasters
+
+# revise GOA table
+Location.DSCS.GOA %>%
+  filter(!is.na(Bcurrent)) ->       # remove samples outside the GOA raster
+  Location.DSCS.GOA
+nrow(Location.DSCS.GOA)             # 293 records
+nrow(Location.DSCS.testGOA)         #  47 records
+Location.DSCS.GOA <- rbind(Location.DSCS.GOA,Location.DSCS.testGOA) # revised GOA table
+
+# check tables, total of 866, okay
+nrow(Location.DSCS.AI)
+nrow(Location.DSCS.EBS)
+nrow(Location.DSCS.GOA)
+
+# bind tables
+Location.DSCS <- rbind(Location.DSCS.AI,Location.DSCS.EBS,Location.DSCS.GOA)
+nrow(Location.DSCS)                 # 866 samples
+Location.DSCS %>%
+  filter(!is.na(Tmax)) ->           # delete NA values (i.e., samples laying outside any raster)
+  Location.DSCS
+nrow(Location.DSCS)                 # 864 samples
+```
+
+### Add the Proportion RockCobble data, which was collected during the camera surveys
+```{r,echo=FALSE,cache=TRUE}
+RockCobble <- as_tibble(read.csv(paste(projdir.results,"Proportion.RockCobble.csv",sep="")))
+RockCobble %>% 
+  select(-X) ->
+  RockCobble
+Location.DSCS %>%
+  left_join(RockCobble, by="Deployment_ID") %>%
+  rename(RockCobble = Proportion_RockCobble)->
+  Location.DSCS
+Location.DSCS %>%
+  select(-X) ->
+  Location.DSCS
+
+# write final version
+write.csv(Location.DSCS,paste(projdir.results,"Location.DSCS.variables.csv",sep=""))
+```
+

@@ -1,0 +1,638 @@
+---
+title: "read and compile camera data"
+author: "Mike Sigler"
+date: "3/23/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(ggpubr)
+library(mgcv)
+library(mapdata)
+library(mapproj)
+library(PerformanceAnalytics)  
+```
+
+### Read and compile camera data
+```{r, echo=FALSE}
+  rm(list = ls())
+
+# survey.number - 1 through 7
+#   survey.number            survey.name      number.transects
+#              1 Data.1 Kodiak 2012-2014.csv               40
+#              2        Data.2 MACE 2013.csv               64
+#              3        Data.3 MACE 2015.csv               89
+#              4        Data.4 MACE 2017.csv               74
+#              5             Data.5 HAPC.csv               73
+#              6        Data.6 Aleutians.csv              216
+#              7         Data.7 EBS 2014.csv              250
+#              8     AI SSL Density_data.csv               61
+#
+# Total number of transects - 867
+# VARIABLES
+# survey.number - added variable to identify data set (1 through 6)
+# Deployment_ID - unique ID for each camera drop
+# Start_long - DDD.DDDD
+# End_long - DDD.DDDD
+# Start_lat - DD.DDDDD
+# End_lat - DD.DDDDD
+# Depth - in meters
+# distance_fished - in meters
+# swath - in meters
+# Group.2 and Species - lowest taxonomic level identified in original files, becomes "Species"
+# Species.standard - lowest taxonomic level using Camera Data speciesList.csv (using standard naming)
+# Group.3 - grouped taxonomic level in original file, deleted
+# Species.group - grouped taxonomic level using Camera Data SpeciesList.csv
+# x - count
+# On.bottom - initial frame number (one per second) at start of counting; key field for time matching
+# Off.bottom - final frame number (one per second) at start of counting; key field for time matching
+# Speed - knots (I think)
+# Percent_on (percent of time on bottom)
+# Temperature (NO RECORDS in Gulf of Alaska data; records in Aleutian data)
+# Species group names
+#   coral
+#   crab
+#   fish
+#   octopus
+#   other
+#   Pennatulacean
+#   sponge
+#   Stylasteridae
+#   Zooplankton
+# density (computed) (x/swath/distance) where swath and distance are meters
+
+# set project directories
+projdir <- "D:\\Documents\\Alaska-Coral-and-Sponge-Model\\"
+projdir.dat <- "D:\\Documents\\Alaska-Coral-and-Sponge-Model\\Camera data\\"
+projdir.result <- "D:\\Documents\\Alaska-Coral-and-Sponge-Model\\results\\"
+
+###########################################################################
+# Read data sets
+# count the number of data files (camera surveys)
+data.files.vector=list.files(projdir.dat)
+nfiles <- length(data.files.vector)	            # 8 data files
+sample_size <- data.frame(survey.number=integer(),   # create empty data frame, for storing sample size for each camera survey
+                          survey.name=character(),
+                          number.transects=integer())
+
+# read each data file (camera survey) and store as e.g., Data.1
+for (n in 1:nfiles)
+{
+  file.num <- data.files.vector[n]                                # nth data file
+  file.name <- paste(projdir.dat,file.num,sep="")                 # name of nth data file
+  Data <- as_tibble(read.csv(file.name))                          # Read nth data file
+  sample_size[n,] <- c(n,file.num,nrow(count(Data,Deployment_ID)))  # Sample size of nth data file
+  survey.number <- data.frame(survey.number=rep(n,nrow(Data)))    # Create data frame/column for survey number
+  Data <- bind_cols(survey.number,Data)                           # Add survey number to Data
+  assign(paste("Data.",n,sep=""),Data)                            # Assign individual data frame names for each data set
+}
+
+  sample_size                        # Sample size by camera survey
+  sum(as.numeric(sample_size[,3]))   # Total sample size
+
+#####################################################################  
+# Combine surveys into one table, mydata
+#  start with the 3 MACE surveys (Data.2, Data.3, Data.4)
+  str(Data.2)
+  str(Data.3)   # Data.2 and Data.3 have the same format
+  mydata <- bind_rows(Data.2,Data.3)  # combine data sets 2 and 3
+  mydata$distance_fished <- mydata$Percent_on *
+                            mydata$distance_fished   # Both Data.2 and Data.3 have values for Percent_on. 
+                                                     # Chris said to adjust distance_fished for Percent_on
+  mydata$Percent_on <- NA                            # now change Percent_on to NA, since adjustment completed
+                # Data.4
+  str(Data.4)   # compared to Data.2/3
+                #   drops speed column and adds temperature column (but no recorded temperatures) 
+                #     ==> add Temperature column to Data.2/3 and Speed column to Data.4 (with NA values)
+                #   EventID (a number) substituted for Haul (same value as Deployment_ID)  
+                #     ==> drop Event_ID from Data.4 and Haul from Data.2/3
+                #   no Percent.on   
+                #     ==> add Percent_on with NA values to Data.4 
+                #   adds a column Swath  
+                #   from Chris, 10/21/2020: I looked at the Swath column in my code. It turns out for 2017 you should use 
+                #     the “Swath” column. It should only appear in that year. I had to go back and do some manual 
+                #     calculations on that one, which is the reason for the multiple columns.
+                #     ==> rename column Swath to swath (first deleting original swath) for Data.4
+                #   adds a column for species group (Group.2) to specific species (Group.3)
+                #     but Data.2/3 only has a column for specific species (Group.2, SO DIFFERENT NAMING)
+                #     ==> switch column names in Data.4 to match Data.2/3 (Group.2 = specific species) 
+                #     ==> add column for species group (Group.3) to Data.2/3 (filled with NA, ***FOR NOW***)
+                # Chris says that Isididae in fact is a misidentified Primnoidae
+                # changed in the input file, Deployment_ID=="D20170622-T090107"
+                # "Isididae" ==> "Primnoidae"
+  
+# data revisions to Data.4 to match Data.2 and Data.3  
+  mydata$Temperature <- NA
+  Data.4$Speed <- NA
+  Data.4 <- select(Data.4,-Event_ID)
+  mydata <- select(mydata,-Haul)
+  Data.4$Percent_on <- NA
+  
+  Data.4 <- select (Data.4,-swath)   # drop swath (the original value) from Data.4
+  Data.4$swath <- Data.4$Swath       # assign adjusted value (Swath) in place of the original value
+  Data.4 <- select(Data.4,-Swath)    # drop Swath (now duplicates swath)
+
+  Data.4$temp <- Data.4$Group.2      # place species group data in a temporary column
+  Data.4$Group.2 <- Data.4$Group.3   # rename species specific data as Group.2
+  Data.4$Group.3 <- Data.4$temp      # rename temp (species group) data as Group.3
+  Data.4 <- select(Data.4,-temp)     # remove temp column
+  mydata$Group.3 <- NA  
+# check data revisions
+  str(mydata); str(Data.4)           # looks good (matching names and 18 columns each)
+  
+# add data set #4 to mydata (data sets #2 and #3)
+  mydata <- bind_rows(mydata,Data.4)
+  dim(mydata)                        # looks good
+  summary(mydata)                    # no temperatures recorded in the MACE surveys!
+  
+# Add Kodiak data (Data.1)
+  str(Data.1);str(mydata)            # all data columns in Data.1 are found in mydata with the same variable naming 
+  dim(Data.1);dim(mydata)            # fewer columns (11) in Data.1 than mydata (18)
+  summary(Data.1)                    # again, no temperatures recorded :(
+  mydata <- full_join(Data.1,mydata) # missing columns in Data.1 added with NA values
+  dim(mydata)                        # looks good
+
+# Add HAPC data (Data.5)
+  str(Data.5);str(mydata)  
+  summary(Data.5)
+# compared to mydata
+  #   uses distance instead of distance_fished 
+  #     ==> change name
+  #   uses count instead of x 
+  #     ==> change name
+  #   uses density with no equivalent in mydata 
+  #     ==> drop density (will be computed later, compare these values to computation)
+  #   missing columns: On.bottom, Off.bottom, Speed, Percent_on, Temperature, Group.3
+  #     ==> add columns
+# data revisions    
+  Data.5$distance_fished <- Data.5$distance   
+  Data.5$x <- Data.5$count              
+  Data.5 <- select(Data.5,-distance)
+  Data.5 <- select(Data.5,-count)
+  Data.5 <- select(Data.5,-density)   ### CHECK COMPUTATION CAREFULLY ###
+  Data.5$On.bottom <- NA
+  Data.5$Off.bottom <- NA
+  Data.5$Speed <- NA
+  Data.5$Percent_on <- NA
+  Data.5$Temperature <- NA
+  Data.5$Group.3 <- NA  
+
+# check revisions
+  str(Data.5);str(mydata)  
+
+# combine data sets
+  test <- bind_rows(mydata,Data.5)
+  dim(test);dim(mydata);dim(Data.5)   # looks good
+  mydata <- bind_rows(mydata,Data.5)  # mydata includes all Gulf of Alaska data sets (#1-5)
+  
+# Add the Aleutians data (Data.6)
+  str(Data.6);str(mydata)  
+  summary(Data.6)
+# compared to mydata
+#   has additional column 'Haul' (as well as 'Deployment_ID')
+#     ==> drop haul
+#   distance_fished has not been adjusted for percent_on in Data.6, but has been adjusted in mydata
+#     ==> adjust distance_fished for percent_on
+#   Group.3 is the lowest taxonomic level identified in Data.6,
+#     whereas Group.2 is the lowest taxonomic level in mydata
+#     In Data.6, drop Group.2 and rename Group.3 to Group.2
+#   No speed column 
+#     ==> add speed column to Data.6
+#   Count is used in Data.6 and x in mydata
+#     ==> rename Count to x in Data.6
+# data revisions    
+  Data.6 <- select(Data.6,-Haul)     # drop haul
+  Data.6$distance_fished <- Data.6$distance_fished * Data.6$Percent_on # adjust distance fished by percent on bottom
+                                     # rename groups
+  Data.6$temp <- Data.6$Group.2      # place species group data in a temporary column
+  Data.6$Group.2 <- Data.6$Group.3   # rename species specific data as Group.2
+  Data.6$Group.3 <- Data.6$temp      # rename temp (species group) data as Group.3
+  Data.6 <- select(Data.6,-temp)     # remove temp column
+  Data.6$Speed <- NA
+  Data.6$x <- Data.6$Count           # rename count            
+  Data.6 <- select(Data.6,-Count)
+  Data.6$test <- Data.6$x / Data.6$distance_fished / Data.6$swath 
+                                     # check density computation: match density values in the original file
+  Data.6 <- select(Data.6,-Density)  # remove original density value
+  Data.6 <- select(Data.6,-test)     # remove test value
+    
+  # combine data sets
+  test <- bind_rows(mydata,Data.6)
+  dim(test);dim(mydata);dim(Data.6)   # looks good
+  mydata <- bind_rows(mydata,Data.6)  # mydata includes all Gulf of Alaska data sets (#1-5) 
+                                      #   and the Aleutian Islands data (#6)
+  
+# Add the eastern Bering Sea data (Data.7)
+  str(Data.7);str(mydata)  
+  summary(Data.7)
+  # compared to mydata, Data.7 ...
+  #   has additional column 'Haul' (as well as 'Deployment_ID')
+  #     ==> drop haul
+  #   distance_fished has been adjusted for percent_on in Data.7 (computed density and compared to Data.7 values)
+  #     ==> no need to adjust distance_fished for percent_on
+  #   missing 'Speed'
+  #     ==> add Speed
+  #   Group.2 is the lowest taxonomic level identified in Data.7, same as mydata
+  #     Group.3 is identified in Data.7 but not in mydata
+  #     ==> add Group.3 (with NA values) to Data.7
+  #   Area and Density are included in Data.7 but not my data
+  #     ==> drop these columns from Data.7
+# data revisions    
+  Data.7 <- select(Data.7,-Haul)     # drop haul
+  Data.7$Group.3 <- NA               # add Group.3
+  Data.7$Speed <- NA                 # add Speed
+  Data.7 <- select(Data.7,-Area)     # drop Area
+  Data.7 <- select(Data.7,-Density)  # drop Density
+  
+# combine data sets
+  test <- bind_rows(mydata,Data.7)
+  dim(test);dim(mydata);dim(Data.7)   # looks good
+  mydata <- bind_rows(mydata,Data.7)  # mydata includes all Gulf of Alaska data sets (#1-5), 
+                                      #   the Aleutian Islands data (#6), and 
+                                      #   the eastern Bering Sea data (#7)
+  
+# Add the Aleutians data collected within Steller sea lion protection zones (Data.8)
+  str(Data.8);str(mydata)  
+  summary(Data.8)
+  
+# Data.8 has two extra columns, taxa and density and is missing several columns (e.g., On.bottom)
+# data revisions    
+  Data.8 <- select(Data.8,-c(Taxa,Density))     # drop haul
+  Data.8$On.bottom <- NA             # add On.bottom
+  Data.8$Off.bottom <- NA            # add On.bottom
+  Data.8$Speed <- NA                 # add Speed
+  Data.8$Percent_on <- NA            
+  Data.8$Temperature <- NA           
+  Data.8$Group.3 <- NA               # add Group.3
+
+# combine data sets
+  test <- bind_rows(mydata,Data.8)
+  dim(test);dim(mydata);dim(Data.8)   # looks good
+  mydata <- bind_rows(mydata,Data.8)  # mydata includes all Gulf of Alaska data sets (#1-5), 
+                                      #   the Aleutian Islands data (#6), and 
+                                      #   the eastern Bering Sea data (#7), and
+                                      #   Aleutians sea lion protection areas
+ nrow(mydata)                         # 7,960 records
+ 
+ # check whether location is present
+ summary(mydata)                      # 24 records with location and depth missing
+ mydata %>%                           # delete those records
+   filter(!is.na(Start_long)) ->
+   temp
+ nrow(temp)
+ mydata <- temp
+ nrow(mydata)
+###################################################################################################
+# Check data
+# Check for rows with NA for x (the count column), i.e., camera deployed but no organisms observed
+  filter(mydata,is.na(x)) # 9 rows, for all cases, only one record with no Group.2 observations (NA)
+#  survey.number     Deployment_ID 
+#  2 D20130706-T095847   
+#  2 D20130731-T100634
+#  2 D20130731-T105057
+#  3 D20150719-T083545 
+#  6 D20140506-T214001   
+#  6           Haul 13 
+#  7 D20140818-T163125   
+#  8 SSL_2016_HAUL1 
+#  8    SSL_2016_HAUL5
+  ### CHRIS: treat as zeros ###
+#  ==> for these 9 cases, rename Group.2 to "None" and set x = 0
+  mydata$x[is.na(mydata$Group.2)] <- 0
+  mydata$Group.2[is.na(mydata$Group.2)] <- "None"
+  nrow(mydata)
+  filter(mydata,is.na(x)) # 0 rows
+  filter(mydata,Group.2 == "None")   # 0 rows, correct
+    
+# reduce and rename columns 
+  mydata <- select(mydata,-On.bottom,-Off.bottom,-Speed,-Percent_on)   # columns not used in analyses
+  mydata$Species <- mydata$Group.2             # rename Group.2 (original species name)
+  mydata <- select(mydata,-c(Group.2,Group.3)) # remove Group.2 and Group.3, 
+                                 #   lists of species names which will be standardized in the next section
+  colnames(mydata)
+```
+
+### Check species names, add new names to the master list, SpeciesList.revised.V3.csv
+#### RERUN ONLY IF new data added
+```{r, echo=FALSE}
+#   run the next several steps only if new data added (0/1 toggle)
+# At Chris's advice, standard name for "Halipteris willemoesi" and "Pennatulacean" is "Halipteris sp"
+  run.sppcheck <- 0
+  if (run.sppcheck == 1) {
+  mydata %>%
+    group_by(Species) %>%
+    summarise(avg = mean(x)) %>%
+    arrange(avg) ->        
+    summary.mydata.Species                                            # list of Species
+    summary.mydata.Species <- select(summary.mydata.Species,-avg)     # select only the list of Species
+  Species.List <- as_tibble(read.csv(paste(projdir.result,"Species.List.csv",sep="")))   # load table of standard names
+
+  temp <- left_join(summary.mydata.Species,Species.List,by="Species") # compare lists (missing names show as "NA") 
+  temp %>%
+    filter(is.na(Species.standard))
+                                                                      # ==> add missing names to master list
+  
+  nrow(Species.List)                                               # 491 records with some duplicates
+  Species.List <- distinct(Species.List)                           # remove matching rows in Species.List
+  nrow(Species.List)                                               # 491 records
+
+# bookkeeping step: reduce Species.List to only names found in mydata
+  temp <- left_join(mydata,Species.List,by="Species")              # match standard names to mydata,
+  nrow(temp); nrow(mydata)                                         # distinct command worked!
+  mydata <- temp                                                   # rename
+
+  mydata %>%
+    select(c("Species.standard","Family","Species.group")) %>%
+    distinct() ->
+    Species.List
+  nrow(Species.List)   #  82 Standard.species in mydata, Gulf of Alaska
+                       # 106 Standard.species in mydata, adding Aleutian Islands
+                       # 134 Standard.species in mydata, adding eastern Bering Sea
+                       # 138 Standard.species in mydata, adding AI sea lion protection areas
+  } 
+```
+
+### Standardize species, family and group names in mydata
+```{r, echo=FALSE}
+  Species.List <- read.csv(paste(projdir.result,"Species.List.csv",sep=""))    # Load final version of Species.List  
+  mydata <- left_join(mydata,Species.List,by="Species")     # Add standard names
+  mydata <- select(mydata,-Species)                         # Drop non-standard species name
+  mydata %>%                                                # reduce species list to those found in mydata
+    select(c("Species.standard","Family","Species.group")) %>%
+    distinct() ->
+    Species.List
+  nrow(Species.List)   # 138 Standard.species in mydata 
+  
+# reorder columns
+  colnames(mydata)
+  col.order <- c("survey.number","Deployment_ID","Start_long","Start_lat","End_long","End_lat","Depth","Temperature",
+                 "distance_fished","swath","Species.standard","Family","Species.group","x") 
+  mydata <- mydata[, col.order]
+  colnames(mydata)   # looks good
+  nrow(mydata)       # 2163 records for Gulf of Alaska,
+                     #   increased to 4404 records with addition of the Aleutians data,
+                     #   increased to 6861 records with addition of the eastern Bering Sea data  
+                     #   increased to 7936 records with addition of AI SSL data
+
+# with addition of the Aleutians data, Deployment_ID no longer is unique
+#   haul number used in some records for Data.1 and all records for Data.6,
+#   some haul numbers in Data.6 duplicate those in Data.1
+#   add data set number at start of Deployment_ID
+  nrecords <- nrow(mydata)
+  for (n in 1:nrecords)  {
+    mydata$Deployment_ID[n] <- paste("Data.",mydata$survey.number[n],".",mydata$Deployment_ID[n],sep="")
+  }
+  nrow(mydata)       # 7936 records   
+  
+# add a columnn for region (e.g., GOA) to mydata
+  regions <- bind_cols(seq(1,8,1),
+            c(rep("GOA",5),"AI","EBS","AI") )
+  colnames(regions) <- c("survey.number","region")
+  mydata <- left_join(mydata,regions,by="survey.number")
+  nrow(mydata)       # 7936 records     
+### ==> final version of mydata ###
+```
+
+### Tabulate the data by camera deployment and grouped by species, family and species group (e.g., fish) 
+```{r, echo=FALSE}
+# tidy the data (each data set in a tibble, each variable in a column)
+# by standard species name
+  mydata %>% 
+    group_by(Deployment_ID,Species.standard) %>%
+    summarise(sum=sum(x)) %>%
+    spread(Species.standard,sum,fill=0) ->
+    Count.Speciesstandard
+  summary(Count.Speciesstandard)
+   
+# by family
+  mydata %>% 
+    group_by(Deployment_ID,Family) %>%
+    summarise(sum=sum(x)) %>%
+    spread(Family,sum,fill=0) ->
+    Count.Family
+  summary(Count.Family)
+  
+# by species group
+  mydata %>% 
+    group_by(Deployment_ID,Species.group) %>%
+    summarise(sum=sum(x)) %>%
+    spread(Species.group,sum,fill=0) ->
+    Count.Speciesgroup  
+  summary(Count.Speciesgroup)
+```
+   
+### Group data by camera deployment and compute density for all species (coral, sponge, fish, etc.)  
+```{r, echo=FALSE}
+# location information
+  mydata %>%
+    select(c(survey.number,Deployment_ID,Start_long,Start_lat,End_long,End_lat,Depth,distance_fished,swath,region)) %>%
+    distinct() ->
+    Location
+  Location$area_size <- Location$distance_fished * Location$swath
+  nrow(Location)          # 866 camera drops
+
+# check Location information
+#   on-bottom typically 15 minutes except HAPC dives which were typically 5 minutes and as short as 2 minutes (when seafloor sandy)  
+#   distance fished ~250-300 m; longer distances usually are high current areas (faster drift)
+  summary(Location$distance_fished)
+  summary(Location$swath)
+
+# plot distance_fished by survey
+  Location %>%
+    ggplot(aes(x=distance_fished)) +
+    geom_histogram(bins = 20) +
+    ggtitle("Survey 1") ->
+    p
+  facet(p,facet.by="survey.number")                                     
+  
+# compute density (per hectare = 10000 m^2)
+#   by standard species
+  Density.Speciesstandard <- Count.Speciesstandard                          # Initialize density table
+  Count.Speciesstandard <- left_join(Count.Speciesstandard,Location,by="Deployment_ID")   # match sampled areas to count data
+  Density.Speciesstandard[,2:ncol(Density.Speciesstandard)] <-
+    Count.Speciesstandard[,2:ncol(Density.Speciesstandard)]/                # select columns with species counts
+    Count.Speciesstandard$area_size *                                            # divide by area (m^2)
+    10000                                                                   # per 10000 m^2 = 1 hectare  
+
+#   by family
+  Density.Family <- Count.Family                                            # Initialize density table
+  Count.Family <- left_join(Count.Family,Location,by="Deployment_ID")       # match sampled areas to count data
+  Density.Family[,2:ncol(Density.Family)] <-
+    Count.Family[,2:ncol(Density.Family)]/                                  # select columns with species counts
+    Count.Family$area_size *                                                     # divide by area (m^2)
+    10000                                                                   # per 10000 m^2 = 1 hectare  
+
+# by species groups
+  Density.Speciesgroup <- Count.Speciesgroup                                # Initialize density table
+  Count.Speciesgroup <- left_join(Count.Speciesgroup,Location,by="Deployment_ID")   # match sampled locations to count data
+  Density.Speciesgroup[,2:ncol(Density.Speciesgroup)] <-
+    Count.Speciesgroup[,2:ncol(Density.Speciesgroup)]/                      # select columns with species counts
+    Count.Speciesgroup$area_size *                                               # divide by area (m^2)
+    10000                                                                   # per hectare  
+  
+# verify density computation by comparison with Data.4 (where density was already computed in the file)
+#  Density.Speciesstandard$'Flatfish unid'[Density.Speciesstandard$Deployment_ID=="HAPC_19"]     
+                                                                            # ==> matches 0.049751941 m-2 in HAPC_data.csv
+#  ==> 7 tables
+# count:        Count.Speciesstandard,  Count.Family, Count.Speciesgroup
+# density:      Density.Speciesstandard, Density.Family, Density.Speciesgroup
+# location:     Location
+```
+
+### Summarize deep sea coral and sponge data, 866 camera drops, and write to results
+```{r, echo=FALSE}
+#   first make list of coral, sponge, sea whip/pen, hydrozoan (Stylasteridae) standard species found in mydata
+  Species.List %>%
+    filter(Species.group=="Sponge"|Species.group=="Coral"|
+             Species.group=="SeaWhipPen"|Species.group=="Hydrozoan") %>%
+    arrange(Species.group,Family,Species.standard) ->           
+    Species.List.DSCS
+  nrow(Species.List.DSCS)   # 18 standard species in the Gulf of Alaska, 
+                            #   24 by adding the Aleutian Islands data, 
+                            #   26 by adding the eastern Bering Sea data,
+                            #   27 by adding AI SSL data
+  write.csv(Species.List.DSCS,paste(projdir.result,"Species.List.DSCS.csv",sep=""))   # list of coral, sponge, sea whip/pen Species names in new camera data
+
+# then select columns with coral, sponge or sea whip/pen
+#   there may be a more efficient way to do this, e.g., list the colnames and then select based on the colname list
+  spp <- 1
+  Density.Speciesstandard %>%
+    select(Species.List.DSCS$Species.standard[spp]) ->
+    DSCS
+  for (spp in 2:nrow(Species.List.DSCS)) {
+  Density.Speciesstandard %>%
+    select(Species.List.DSCS$Species.standard[spp]) ->
+    temp
+  DSCS <- cbind(DSCS,temp[,2])
+  }
+  summary(DSCS)    
+  
+# table of coral, sponge, sea whip/pen      
+# Table 1 - count and mean of non-zero observations
+  num.species <- nrow(Species.List.DSCS)
+  num.records <- nrow(DSCS)
+  Table.1 <- as.data.frame(cbind(Species.List.DSCS$Species.standard,rep("NA",num.species),rep("NA",num.species)))
+  colnames(Table.1) <- c("Species.standard","Proportion.nonzero","Cpue.nonzero")
+# compute count (proportion) and mean of non-zero observations
+  # use loops again
+  for (spp in 1:num.species) {
+    Table.1[spp,2] <- round(nrow(subset(DSCS,DSCS[,spp+1]>0))/num.records,3)
+    temp <- subset(DSCS,DSCS[,spp+1]>0)
+    Table.1[spp,3] <- round(sum(temp[,spp+1])/num.records,3)   # consider computing median 
+  }
+  Table.1 %>%
+    arrange(desc(Proportion.nonzero)) ->
+    Table.1
+#  write.csv(Table.1,paste(projdir.result,"Table.1.csv",sep=""))
+  
+# Output file for higher level analyses  
+  Location.DSCS <- left_join(Location,DSCS,by="Deployment_ID")         # join location and cpue data
+  nrow(Location.DSCS)  
+  write.csv(select(Location.DSCS,-c(distance_fished,swath,area_size)),
+            paste(projdir.result,"Location.DSCS.csv",sep=""))                                       # write to file, excluding sample effort info
+```
+
+### Some data plots
+#### some (but not all) are duplicated in analysis.Rmd
+```{r, echo=FALSE}  
+# Bar plots (bp) by species
+  bp.proportion <- ggbarplot(Table.1, x = "Species.standard", y = "Proportion.nonzero",
+                    color = "black",            # Set bar border colors to white
+                    palette = "jco",            # jco journal color palett. see ?ggpar
+                    sort.val = "asc",           # Sort the value in ascending order
+                    x.text.angle = 90           # Rotate vertically x axis texts
+    )
+  bp.proportion
+
+  Table.1$Cpue.nonzero <- as.numeric(Table.1$Cpue.nonzero)  
+  bp.cpue <- ggbarplot(Table.1, x = "Species.standard", y = "Cpue.nonzero",
+                       color = "black",            # Set bar border colors to white
+                       palette = "jco",            # jco journal color palett. see ?ggpar
+                       sort.val = "asc",           # Sort the value in ascending order
+                       x.text.angle = 90           # Rotate vertically x axis texts
+  )
+  bp.cpue
+
+########################################################################
+# Examine sampling intensity by depth and longitude
+#   first need longitude on a single scale 
+  Location$Start_long360 <- Location$Start_long  # initialize a column to store single scale (0-360) values
+  for (j in 1:nrow(Location)) {
+    if (Location$Start_long360[j]>0) {Location$Start_long360[j] <- -180-(180-Location$Start_long360[j])}
+  }
+  summary(Location$Start_long360)   # computation works
+  Location %>%
+    ggplot(aes(x=Depth)) +        # by depth
+    geom_histogram() ->
+    p
+  facet(p,facet.by="region")
+  
+  Location %>%
+    ggplot(aes(x=Start_long360)) +   # by longitude
+    geom_histogram() ->
+    p
+  facet(p,facet.by="region")
+
+  Location %>%
+    ggplot(aes(x=Start_lat)) +   # by latitude
+    geom_histogram() ->
+    p
+  facet(p,facet.by="region")
+####################################################################    
+# Examine depth distribution by species 
+#   Scatterplot
+  Location %>%                                                     # start with Location table
+    select(Deployment_ID,Depth) %>%                                # select deployment_ID and depth
+    left_join(DSCS,by="Deployment_ID") %>%                         # join density data
+    gather(key=Species,value=Density,Acanthogorgia.sp:Porifera) %>%   # reformat data
+    filter (Density>0) %>%                                         # include only non-zero densities
+    ggplot(aes(x=Depth,y=Density)) +                               # plot density vs. depth
+    geom_point(shape=1) +                                          # scatterplot
+    geom_smooth() ->                                               # add loess smoother
+    p
+  facet(p,facet.by="Species")                                      # plot (facet) by species :)
+
+# boxplot 
+  Location %>%                                                               # start with Location table
+    select(Deployment_ID,Depth) %>%                                          # select deployment_ID and depth
+    left_join(DSCS,by="Deployment_ID") %>%                                   # join density data
+    gather(key=Species.standard,value=Density,Acanthogorgia.sp:Porifera) %>%    # reformat data
+    left_join(Species.List.DSCS,by="Species.standard") %>%                   # add family names
+    filter (Density>0) %>%                                                   # include only non-zero densities
+    ggplot(aes(x=reorder(Species.standard,Depth,median),y=Depth,fill=Family)) +    # plot depth by species and color by family
+    geom_boxplot() +
+    theme(axis.text.x = element_text(angle=90, vjust=0.5, hjust=1)) +
+    coord_flip() -> p1
+  p1
+  
+##############################################################################
+  # Examine longitude distribution by species 
+  #   Scatterplot
+  Location %>%                                                     # start with Location table
+    select(Deployment_ID,Start_long360) %>%                           # select deployment_ID and start longitude
+    left_join(DSCS,by="Deployment_ID") %>%                         # join density data
+    gather(key=Species,value=Density,Acanthogorgia.sp:Porifera) %>%   # reformat data
+    filter (Density>0) %>%                                         # include only non-zero densities
+    ggplot(aes(x=Start_long360,y=Density)) +                               # plot density vs. depth
+    geom_point(shape=1) +                                          # scatterplot
+    geom_smooth() ->                                               # add loess smoother
+    p
+  facet(p,facet.by="Species")                                      # plot (facet) by species :)
+  
+# boxplot 
+  Location %>%                                                               # start with Location table
+    select(Deployment_ID,Start_long360) %>%                                          # select deployment_ID and depth
+    left_join(DSCS,by="Deployment_ID") %>%                                   # join density data
+    gather(key=Species.standard,value=Density,Acanthogorgia.sp:Porifera) %>%    # reformat data
+    left_join(Species.List.DSCS,by="Species.standard") %>%                   # add family names
+    filter (Density>0) %>%                                                   # include only non-zero densities
+    ggplot(aes(x=reorder(Species.standard,Start_long360,median),y=Start_long360,fill=Family)) +         # plot depth by species and color by family
+    geom_boxplot() +
+    theme(axis.text.x = element_text(angle=90, vjust=0.5, hjust=1)) +
+    coord_flip() -> p2
+  p2
+```

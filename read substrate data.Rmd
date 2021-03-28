@@ -1,0 +1,311 @@
+---
+title: "read and compile substrate data"
+author: "Mike Sigler"
+date: "3/25/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(ggpubr)
+library(mgcv)
+library(mapdata)
+library(mapproj)
+library(PerformanceAnalytics)  
+```
+
+### Read and compile substrate data
+```{r,echo=FALSE,cache=TRUE}
+rm(list = ls())
+
+# MACE 2013 and 2015 data originally were in one file (together)
+# I split this one file into two files manually, to match the file structure of the camera data
+#   *** NAMES FOR AI AND EBS DATA WERE INCORRECT (INVERTED) ***
+# survey.number                    survey.name number.transects
+# 1             1      Data.1 Kodiak cruises.csv            70780
+# 2             2           Data.2 MACE 2013.csv            42589
+# 3             3           Data.3 MACE 2015.csv           118741
+# 4             4           Data.4 MACE 2017.csv            93171
+# 5             5           Data.5 HAPC data.csv            22304
+# 6             6 Data.6 Aleutians substrate.csv           188159
+# 7             7  Data.7 EBS Substrate_data.csv           224433
+# 8             8   Data.8 AI SSL frame_data.csv            53787
+#
+# Total number of samples - 813964
+# 
+# VARIABLES
+# survey.number - added variable to identify data set (1 through 6)
+# Deployment_ID - unique ID for each camera drop
+# frame_time - frame time (uses various formats)
+# primary_habitat_type - 
+# secondary_habitat_type -
+# there are other variables in these data files; these are the variables of interest
+# there are blanks and off bottom listed for habitat_type, both at the start
+#   and within a deployment. These are deleted.
+
+# set project directories
+projdir <- "D:\\Documents\\Alaska-Coral-and-Sponge-Model\\"
+projdir.dat <- "D:\\Documents\\Alaska-Coral-and-Sponge-Model\\Substrate data\\"
+projdir.result <- "D:\\Documents\\Alaska-Coral-and-Sponge-Model\\results\\"
+
+###########################################################################
+# Read data sets
+# count the number of data files (camera surveys)
+data.files.vector=list.files(projdir.dat)
+nfiles <- length(data.files.vector)	            # 8 data files
+sample_size <- data.frame(survey.number=integer(),   # create empty data frame, for storing sample size for each camera survey
+                          survey.name=character(),
+                          number.transects=integer())
+
+# read each data file (camera survey) and store as e.g., Data.1
+for (n in 1:nfiles)
+{
+  file.num <- data.files.vector[n]                                # nth data file
+  file.name <- paste(projdir.dat,file.num,sep="")                 # name of nth data file
+  Data <- as_tibble(read.csv(file.name))                          # Read nth data file
+#  sample_size[n,] <- c(n,file.num,nrow(count(Data,Deployment_ID)))  # Sample size of nth data file
+  sample_size[n,] <- c(n,file.num,nrow(Data))  # Sample size of nth data file
+  
+  survey.number <- data.frame(survey.number=rep(n,nrow(Data)))    # Create data frame/column for survey number
+  Data <- bind_cols(survey.number,Data)                           # Add survey number to Data
+  assign(paste("Data.",n,sep=""),Data)                            # Assign individual data frame names for each data set
+}
+
+sample_size                        # Sample size by camera survey
+sum(as.numeric(sample_size[,3]))   # Total sample size 813,964
+
+#####################################################################  
+# Combine surveys into one table, mydata
+#  start with the 3 MACE surveys (Data.2, Data.3, Data.4)
+str(Data.2)
+str(Data.3)                         # Data.2 and Data.3 have the same format
+mydata <- bind_rows(Data.2,Data.3)  # combine data sets 2 and 3
+
+# Data.4
+str(Data.4)   # compared to Data.2/3
+#   misses Latitude, Longitude, Speed, ES60Depth
+#     ==> drop these columns from Data.2/3
+
+# data revisions to Data.4 to match Data.2 and Data.3  
+  mydata %>%
+    select(-c(Latitude, Longitude, Speed, ES60Depth)) ->
+    mydata
+  mydata <- bind_rows(mydata,Data.4)                      # add data set 4
+  nrow(Data.2); nrow(Data.3); nrow(Data.4); nrow(mydata)  # check binding ==> number of rows adds up 
+  
+# Add Kodiak data (Data.1)
+  str(mydata)
+  str(Data.1)                             # same columns ==> add Data.1 to mydata
+  mydata <- rbind(mydata,Data.1)
+  nrow(mydata)                            # number of rows adds up
+  
+# Add HAPC data (Data.5)
+  str(mydata)
+  str(Data.5)                                                                   
+# several differences between mydata and Data.5
+# adds Longitude, Latitude, Depth ==> drop these columns
+# uses different names for deployment_ID, primary_habitat_type, and secondary_habitat_type ==> change names
+# does not include frame_number, B1-B5, A1-A2 or comment columns ==> drop these columns from mydata
+  Data.5 %>%
+    select(-c(Latitude, Longitude, Depth)) ->                                   # drop 3 columns from Data.5
+    Data.5
+  Data.5$deployment_ID <- Data.5$Transect; Data.5 <- select(Data.5,-Transect)   # renaming
+  Data.5$frame_time <- Data.5$TimeCode; Data.5 <- select(Data.5,-TimeCode)
+  Data.5$primary_habitat_type <- Data.5$Primary_substrate; Data.5 <- select(Data.5,-Primary_substrate)
+  Data.5$secondary_habitat_type <- Data.5$Secondary_substrate; Data.5 <- select(Data.5,-Secondary_substrate)
+  mydata %>%
+    select(-c(frame_number)) %>%
+    select(-c(B1_present:comment)) ->     # drop several columns from mydata 
+    mydata
+  mydata <- rbind(mydata,Data.5)
+  nrow(mydata)                            # number of rows add up (347,585)
+  
+# Add eastern Bering Sea data (Data.7)
+  str(mydata)
+  str(Data.7)    
+  # capitalizes deployment_ID ==> change name
+  # many additional columns (e.g., Longitude) ==> drop these columns
+  Data.7$deployment_ID <- Data.7$Deployment.ID; Data.7 <- select(Data.7,-Deployment.ID)   # renaming
+  Data.7 %>%
+    select(-c(X:ES60_depth,B1_present:substrate_class)) ->   # drop columns
+    Data.7
+  mydata <- rbind(mydata,Data.7)
+  nrow(mydata)                                               # number of rows add up (572,018)
+
+# Add Aleutians data (Data.6)
+  str(mydata)
+  str(Data.6) 
+  # uses name deployment ==> change name
+  # many additional columns (e.g., Longitude) ==> drop these columns
+  Data.6$deployment_ID <- Data.6$deployment; Data.6 <- select(Data.6,-deployment)   # renaming
+  Data.6 %>%
+    select(-c(X:ES60_depth,AN_checked:area)) ->   # drop columns
+    Data.6
+  mydata <- rbind(mydata,Data.6)
+  nrow(mydata)                                    # number of rows add up (760,177)
+  
+# Add AI SSL data (Data.8)
+  str(mydata)
+  str(Data.8); nrow(Data.8) 
+  Data.8 %>%
+    select(-c(frame_number,B1_present:comment)) ->   # drop columns
+    Data.8
+  mydata <- rbind(mydata,Data.8)
+  nrow(mydata)                                    # number of rows add up (813,964)
+
+# Combine survey.number and deployment_ID in one column and rename to Deployment_ID to match camera data names (takes several minutes to run)
+# with addition of the Aleutians data, Deployment_ID no longer is unique
+#   haul number used in some records for Data.1 and all records for Data.6,
+#   some haul numbers in Data.6 duplicate those in Data.1
+#   add data set number at start of Deployment_ID
+  nrecords <- nrow(mydata)
+  for (n in 1:nrecords)  {
+    mydata$Deployment_ID[n] <- paste("Data.",mydata$survey.number[n],".",mydata$deployment_ID[n],sep="")
+  }
+  nrow(mydata)                     # 813,964 records
+  mydata %>%
+    select(-c(deployment_ID)) ->   # drop revised and renamed column
+    mydata  
+  
+# add a columnn for region (e.g., GOA) to mydata
+  regions <- bind_cols(seq(1,8,1),
+                       c(rep("GOA",5),"AI","EBS","AI") )
+  colnames(regions) <- c("survey.number","region")
+  mydata <- left_join(mydata,regions,by="survey.number")
+  nrow(mydata)       # 813,964 records     
+  ### ==> final version of mydata ###
+```
+  
+### Standardize habitat names
+```{r,echo=FALSE,cache=TRUE}
+
+# Standardize habitat names in my data
+# First, compile habitat names based on names in "mydata"
+  mydata %>%   # list of primary names first
+    count(primary_habitat_type) ->
+    primary_habitat
+  mydata %>%   # then secondary names
+    count(secondary_habitat_type) ->
+    secondary_habitat
+# change column names to standard, so that tibbles can be combined by row
+  primary_habitat <- rename(primary_habitat,habitat_type = primary_habitat_type)
+  secondary_habitat <- rename(secondary_habitat,habitat_type = secondary_habitat_type)
+  habitat_names <- rbind(primary_habitat,secondary_habitat) # combine lists of primary and secondary names    
+  habitat_names %>%
+    select(habitat_type) ->                    # select column of interest
+    habitat_names
+  distinct(habitat_names) -> habitat_names     # which is a list of unique habitat names
+  write.csv(habitat_names,paste(projdir.result,"habitat.names.csv",sep="")) # write names to a file, 
+                                               #   use this file to create standard names
+
+# create list of standard habitat names and identify group 
+#  The two groups are RockCobble and unconsolidated substrate
+#  Only need to identify one group because the rest are unconsolidated
+  habitat_standard <- c("None","None","Boulder","Boulder","Boulder","Boulder","Cobble","Cobble","Cobble","Gravel","Gravel","Gravel","GravelSandPebble","HighBedrock","HighBedrock","HighBedrock","LowBedrock","LowBedrock","Mud","MixedCoarse","MixedCoarse","Mud","MudSilt","OffBottom","OffBottom","OffBottom","Pebble","LowBedrock","Sand","Sand","Sand","Boulder","Cobble","Gravel","HighBedrock","Mud","MixedCoarse","MixedCoarse","OffBottom","LowBedrock","Sand")
+  RockCobble <- c(0,0,1,1,1,1,1,1,1,0,0,0,0,1,1,1,1,1,0,0,0,0,0,0,0,0,0,1,0,0,0,1,1,0,1,0,0,0,0,1,0)
+  habitat_names <- cbind(habitat_names,habitat_standard,RockCobble)
+# ==> habitat_names is the table that translates from non-standard to standard habitat names
+#       use names tabulated by R because excel appears to add some hidden characters
+
+# match standard habitat names to non-standard names in mydata
+#   and add indicator for group (1 = RockPebble, 0 = Unconsolidated (or None, OffBottom))
+  mydata %>%                                              # first primary habitat
+    left_join(habitat_names,by=c("primary_habitat_type" = "habitat_type")) %>% 
+    select(-c(primary_habitat_type)) %>%                  # remove column of non-standard names
+    rename(primary_habitat_standard = habitat_standard)%>%# rename column of standard names
+    rename(RockCobble_primary = RockCobble) ->            # rename column of RockCobble
+    mydata
+  mydata %>%                                              # then secondary habitat
+    left_join(habitat_names,by=c("secondary_habitat_type" = "habitat_type")) %>% 
+    select(-c(secondary_habitat_type)) %>%                  # remove column of non-standard names
+    rename(secondary_habitat_standard = habitat_standard)%>%# rename column of standard names
+    rename(RockCobble_secondary = RockCobble) ->            # rename column of RockCobble
+    mydata
+# remove OffBottom and None records
+  mydata %>%
+    filter(primary_habitat_standard!="None") %>%      # exclude unmeasured primary
+    filter(primary_habitat_standard!="OffBottom") %>%
+    filter(secondary_habitat_standard!="OffBottom")-> # 9 records off bottom for secondary but not primary
+    mydata                                            # do not exclude unmeasured secondary when primary measured
+# check classification  
+  mydata %>%                         # no OffBottom or None records
+    count(primary_habitat_standard)
+  mydata %>%                         # 1959 records with None for secondary ==> OKAY
+    count(secondary_habitat_standard)
+  
+# write substrate data with standard substrate names to a file
+#  write.csv(mydata,file=paste(projdir.result,"substrate.StandardSubstrateNames.csv",sep=""))
+#############################################################################
+# final version of mydata, which includes standard habitat names and grouping
+#############################################################################
+```
+
+### Tabulate the data by camera deployment
+```{r,echo=FALSE,cache=TRUE}
+# compile proportion of RockCobble as primary or secondary habitat
+#   first create column indicating RockCobble as either primary or secondary habitat
+  mydata$RockCobble <- mydata$RockCobble_primary + mydata$RockCobble_secondary
+  mydata %>%                 
+    group_by(Deployment_ID) %>%
+    count(Deployment_ID) %>%
+    rename(SampleSize = n) ->       # compute sample size (number of frames)
+    SampleSize_Deployment
+  mydata %>%  
+    filter(RockCobble>0) %>%
+    group_by(Deployment_ID) %>%
+    count(Deployment_ID) %>% 
+    rename(Count_RockCobble = n) -> # tally number of RockCobble frames
+    Count_RockCobble
+  SampleSize_Deployment %>%         # join tally and sample size
+    left_join(Count_RockCobble,by="Deployment_ID") %>%
+    mutate_at(vars(-group_cols()), ~replace(., is.na(.), 0)) ->  
+                                    # transform NA to 0 for tally 
+    Proportion_RockCobble
+
+# compute proportion RockCobble
+  Proportion_RockCobble$Proportion_RockCobble <- 
+    Proportion_RockCobble$Count_RockCobble / Proportion_RockCobble$SampleSize
+  Proportion_RockCobble %>%
+    select(Deployment_ID,Proportion_RockCobble) ->   # select columns of interest
+    Proportion_RockCobble
+  write.csv(Proportion_RockCobble,paste(projdir.result,"Proportion.RockCobble.csv",sep=""))
+
+# Some data checks
+# check grouping by deployment
+  mydata %>%                 # determine the number of camera drops
+    group_by(Deployment_ID) %>%
+    summarise(survey.number = mean(survey.number)) %>%
+    arrange(survey.number) ->        
+    summary.mydata
+  nrow(summary.mydata)       # 866 samples, the same number as the number of camera drops :)
+  summary.mydata %>%         # check sample size by survey ==> OKAY
+    count(survey.number) 
+  #  survey.number     n
+  #  1             1    40
+  #  2             2    64
+  #  3             3    89
+  #  4             4    74
+  #  5             5    73
+  #  6             6   216
+  #  7             7   250 
+  #  8             8    60
+  
+# Identify the proportion of RockCobble habitat by deployment
+#     identify by deployment
+  mydata %>%                 
+    group_by(Deployment_ID) %>%
+    summarise(count.RockCobble = sum(RockCobble_primary)) %>%
+    arrange(count.RockCobble) ->        
+    summary.mydata
+  nrow(summary.mydata)       # 866 samples, the same number as the number of camera drops :)
+
+  sum(mydata$RockCobble_primary)  
+  sum(summary.mydata$count.RockCobble)    
+  nrow(mydata)  
+  
+  sum(mydata$RockCobble_primary)/nrow(mydata)   # about 13% RockCobble
+```
+  

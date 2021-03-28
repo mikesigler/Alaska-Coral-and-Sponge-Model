@@ -1,0 +1,305 @@
+---
+title: "Analyze Alaska deep sea coral and sponge data"
+author: "Mike Sigler"
+date: "3/25/2021"
+output: html_document
+---
+##### steps completed prior to these analyses are: 
+##### read and compile camera data, 
+##### read and compile substrate data, 
+##### match camera and substrate data, also adding rasters on variables (e.g., depth)
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+library(PerformanceAnalytics)
+library(ggfortify)
+library(mgcv)
+library(maps)
+library(mapdata)
+library(mapproj)
+library(cowplot)
+library(rgeos)
+library(sf)
+library(rnaturalearth)          #provides a map of countries of the entire world
+library(rnaturalearthdata)
+library(fpc)
+library(cluster)
+library(knitr)
+```
+
+### Read matched data (location, DSCS taxa, raster variables, e.g., depth, RockCobble)
+```{r,echo=FALSE,cache=TRUE}
+# Camera data
+#  Location and depth of the camera deployment
+#  DSCS taxa
+#  substrate - RockCobble, proportion of rock or cobble habitat, from the camera data 
+# Variables of interest (stored in rasters), average annual values
+#  Bathy - depth
+#  Bcurrent - current with tidal effect removed
+#  Btemp - bottom temperature
+#  Color - surface ocean color
+#  Slope - slope
+#  Tmax - maximum tidal current 
+
+rm(list = ls())
+# set project directories
+projdir         <- "D:\\Documents\\Alaska-Coral-and-Sponge-Model\\"
+projdir.dat     <- "D:\\Documents\\AK Coral and Sponge Model\\Camera data\\"
+projdir.results <- "D:\\Documents\\Alaska-Coral-and-Sponge-Model\\Results\\"
+
+# read data
+Location.DSCS <-select(as_tibble(read.csv(paste(projdir.results,"Location.DSCS.variables.csv",sep=""))),-X)
+Species.List.DSCS <- select(as_tibble(read.csv(paste(projdir.results,"Species.List.DSCS.csv",sep=""))),-X)
+variables <- c("Bathy","Bcurrent","Btemp","Color","Slope","Tmax","RockCobble") # update variable names
+```
+
+### Compile table of non-zero DSCS observations
+```{r,echo=FALSE,cache=TRUE}
+# Table 1 - count and mean of non-zero observations
+Location.DSCS %>%                          # select DSCS data
+  select(Acanthogorgia.sp:Porifera) ->    
+  DSCS
+  num.species <- nrow(Species.List.DSCS)
+  num.records <- nrow(DSCS)
+  Table.1 <- as.data.frame(cbind(Species.List.DSCS$Species.standard,rep("NA",num.species),rep("NA",num.species)))
+  colnames(Table.1) <- c("Species.standard","Proportion.nonzero","Cpue.nonzero")
+
+# compute count (proportion) and mean of non-zero observations
+  for (spp in 1:num.species) {
+    Table.1[spp,2] <- round(nrow(subset(DSCS,DSCS[,spp]>0))/num.records,3) # proportion
+    temp <- subset(DSCS,DSCS[,spp]>0)
+    Table.1[spp,3] <- round(sum(temp[,spp])/num.records,3)   # mean (consider computing median) 
+  }
+  Table.1 %>%
+    arrange(desc(Proportion.nonzero)) ->  # order records in descending value
+    Table.1
+  kable(Table.1)
+```
+
+### Hierarchical cluster analysis
+```{r,echo=FALSE,cache=TRUE}
+# some input parameters (which are varied in the analyses) for sensitivity testing
+num.groups <- 4                   # set number of groups
+min.FO <- 0.05                    # set minimum frequency of occurrence
+
+# in cluster analysis, examine only species above minimum FO
+  Table.1 %>%                           
+    filter(Proportion.nonzero>min.FO) ->
+    Table.1
+
+  Location.DSCS %>%                          
+    select(Acanthogorgia.sp:Porifera) %>%    # select DSCS data
+    select(Table.1[,1]) ->                   # select species above minimum FO from data set
+    DSCS                                     # reduced data set (higher FO species)
+
+# cluster analysis
+#  https://www.statmethods.net/advstats/cluster.html
+#  https://www.datacamp.com/community/tutorials/hierarchical-clustering-R
+  
+# Prepare Data
+  DSCS <- na.omit(DSCS)                   # listwise deletion of missing records
+  DSCS.scaled <- as_tibble(scale(DSCS))   # standardize variables to mean = 0 and sd = 1 
+                                          # (but not normally distributed due to zeroes)
+
+# Determine number of clusters
+  wss <- (nrow(DSCS.scaled)-1)*sum(apply(DSCS.scaled,2,var))
+  for (i in 2:15) wss[i] <- sum(kmeans(DSCS.scaled,
+                                     centers=i)$withinss)
+  plot(1:15, wss, type="b", xlab="Number of Clusters",
+     ylab="Within groups sum of squares") 
+  
+##############################################################################  
+# Ward Hierarchical Clustering
+  d <- dist(DSCS.scaled, method = "euclidean")   # distance matrix
+  fitH <- hclust(d, method="ward.D")             # cluster analysis itself
+  plot(fitH)                                     # display dendogram
+  GroupH <- cutree(fitH, k=num.groups)           # cut tree into num.groups clusters
+                                                 #   GroupH is the assigned group
+  rect.hclust(fitH, k=num.groups, border="red")  # draw dendogram with red borders around the clusters 
+  DSCS.cl <- mutate(DSCS.scaled, cluster = GroupH)  # append cluster assignment to scaled DSCS data
+  count(DSCS.cl,cluster)                         # count cluster occurrences
+
+# append cluster assignment to main data table 
+  Location.DSCS.cl <- mutate(Location.DSCS, cluster = GroupH)  
+
+# Create maps of the area of interest and plot the sampling locations
+# https://www.datanovia.com/en/blog/how-to-change-ggplot-facet-labels/
+  theme_set(theme_light() + theme(legend.position = "top"))
+  world <- ne_countries(scale = "medium", returnclass = "sf") 
+  class(world)                                               
+  
+# New facet label names for clusters
+  cluster.names <- c("Halipteris", "Low DSCS", "High DSCS", "Hexactinellid")
+  Location.DSCS.cl$cluster <- factor(Location.DSCS.cl$cluster, levels = c("1", "2","3","4"),
+                    labels = cluster.names)
+# create maps
+  ggplot(data = world) +
+    geom_sf() +
+    geom_point(
+      data = Location.DSCS.cl,   #calls the location data
+      aes(
+        x= Start_long,
+        y = Start_lat),
+      size = 1, 
+      shape = "circle", 
+      colour = "red") +   
+    coord_sf(
+      xlim = c(-180,-140),      # western hemisphere    
+      ylim = c(50,60.5), 
+      expand = FALSE) ->
+    p
+  facet(p,facet.by="cluster") +
+    theme(
+      strip.text.x = element_text(
+        size = 12, color = "black", face = "bold"))   # plot (facet) by cluster group :)
+
+  ggplot(data = world) +
+    geom_sf() +
+    geom_point(
+      data = Location.DSCS.cl,   #calls the location data
+      aes(
+        x= Start_long,
+        y = Start_lat),
+      size = 1, 
+      shape = "circle", 
+      colour = "red") +   
+    coord_sf(
+      xlim = c(160,180),        # eastern hemisphere
+      ylim = c(50,60.5), 
+      expand = FALSE) ->
+    p
+  facet(p,facet.by="cluster") +
+    theme(
+      strip.text.x = element_text(
+        size = 12, color = "black", face = "bold"))          # plot (facet) by cluster group :)
+
+# get cluster means
+  meansH <- t(aggregate(DSCS.cl,by=list(DSCS.cl$cluster),FUN=mean))
+  colnames(meansH) <- cluster.names   # name columns
+  meansH <- meansH[-1,]               # drop first row (duplicates last row)
+  write.csv(meansH,paste(projdir.results,"Hierarchical ",num.groups," groups ",min.FO, "min.FO",".csv",sep=""))
+  kable(meansH)
+
+# plot longitude and depth by cluster
+  Location.DSCS.cl <- mutate(Location.DSCS.cl, Start_long360 = Start_long)  # initialize a column to store longitude 360 values
+  for (j in 1:nrow(Location.DSCS.cl)) {
+    if (Location.DSCS.cl$Start_long360[j]>0) 
+      {Location.DSCS.cl$Start_long360[j] <- -180-(180-Location.DSCS.cl$Start_long360[j])}
+  }
+
+  ggplot(Location.DSCS.cl, aes(x=Start_long360, y = Depth, color = factor(cluster))) + 
+    geom_point() +
+    scale_y_reverse() ->
+    p
+  facet(p,facet.by="cluster")                                      # plot (facet) by cluster group :)
+
+# Cluster Plot against 1st 2 principal components
+# https://www.statmethods.net/advstats/cluster.html  
+
+# vary parameters for most readable graph
+  clusplot(DSCS.scaled, DSCS.cl$cluster, color=TRUE, shade=TRUE,
+           labels=2, lines=0)
+
+# Centroid Plot against 1st 2 discriminant functions
+    plotcluster(DSCS.scaled, DSCS.cl$cluster) 
+```
+
+### compare measured depth (Depth) and extracted depth (Bathy)
+```{r,echo=FALSE,cache=TRUE}
+Location.DSCS %>%
+  ggplot(aes(x=Depth,y=Bathy,color=region)) +
+  geom_point() +
+  geom_abline(slope=1,intercept=0)->
+  p
+p   # ==> some EBS discrepancies at ~150 m
+    # Chris suspects a bad bathymetry area south of Pribilof Canyon
+```
+
+### boxplots of variables by cluster (scaled values)
+```{r,echo=FALSE,cache=TRUE}
+# choose columns
+Location.DSCS.cl %>%
+  select(Depth,Bcurrent:RockCobble) ->
+  variables.cl
+variables.cl <- scale(variables.cl)   # scale to Normal (0,1) (I think, need to check)
+variables.cl <- cbind(Location.DSCS.cl[,2],variables.cl,Location.DSCS.cl[,43])
+
+variables.cl %>%
+  gather(variable,value,Depth:RockCobble) %>%
+  ggplot(aes(x=cluster,y=value)) +
+  geom_boxplot() +
+  coord_flip() ->
+  p
+  facet(p,facet.by="variable")                                 
+```
+  
+### compute median variable values by cluster
+```{r,echo=FALSE,cache=TRUE}
+  Location.DSCS.cl %>%
+    select(all_of(variables)) %>%                 # select variables
+    select(-c("Bathy")) ->                        # drop Bathy (instead use Depth, which was measured)
+    temp1
+  Location.DSCS.cl %>%
+    select(c("cluster","Depth")) ->               # select cluster and Depth
+    temp2
+  var.clusters <- cbind(temp2,temp1)              # bind two tables together
+
+  var.clusters %>%
+    group_by(cluster) %>%
+    summarise_all(list(median=median), na.rm = TRUE) ->   # compute variable medians by cluster
+    var.medians
+  kable(var.medians)
+```
+    
+### Principal Components Analysis (PCA) of variables
+```{r,echo=FALSE,cache=TRUE}
+# first need to translate cluster group (alphabetical) to numeric
+  cluster.col <- data.frame(cbind(cluster.names,seq(1,4)))
+  colnames(cluster.col) <- c("cluster","cluster.number")
+  var.clusters <- left_join(var.clusters,cluster.col,by = "cluster")
+  
+  var.clusters %>%
+    filter(!is.na(RockCobble)) ->             # check for NA values 
+    var.clusters
+  nrow(var.clusters)                        # 862 records (2 RockCobble observations were NA)
+  summary(var.clusters)                     # no NA values
+
+# Correlation coefficients  
+  chart.Correlation(select(var.clusters,-c("cluster","cluster.number")), histogram=TRUE, pch=19)  
+
+# Principle components analysis
+  PCA <- prcomp(select(var.clusters,-c("cluster","cluster.number")), scale=TRUE)     
+  summary(PCA)                                                         
+
+  autoplot(PCA, data = var.clusters, colour = 'cluster.number', shape = 1, 
+           loadings = TRUE, loadings.colour = 'blue',
+           loadings.label = TRUE, loadings.label.size = 3)            # color clusters, https://cran.r-project.org/web/packages/ggfortify/vignettes/plot_pca.html
+# Consider exploring   ggbiplot
+``` 
+
+### Values of RockCobble where each species occurs
+```{r,echo=FALSE,cache=TRUE}
+# Examine RockCobble distribution by species and color box plot by family
+  Location.DSCS.cl %>%                                               # start with main data table
+    gather(key=Species.standard,value=Density,Acanthogorgia.sp:Porifera) %>% # reformat data
+    left_join(Species.List.DSCS,by="Species.standard") %>%                   # add family names
+    filter (Density>0) %>%                                           # exclude zeros
+    ggplot(aes(x=reorder(Species.standard,RockCobble,median),y=RockCobble,fill=Family)) +  
+    geom_boxplot() +
+    theme(axis.text.x = element_text(angle=90, vjust=0.5, hjust=1)) +
+    coord_flip() -> p1
+  p1
+  
+# Examine RockCobble distribution by cluster
+  Location.DSCS.cl %>%                                               # start with main data table
+    ggplot(aes(x=reorder(cluster,RockCobble,median),y=RockCobble)) +  
+    geom_boxplot() +
+    theme(axis.text.x = element_text(angle=90, vjust=0.5, hjust=1)) +
+    coord_flip() -> p1
+  p1
+```
+
