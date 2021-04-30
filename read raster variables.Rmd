@@ -1,0 +1,171 @@
+---
+title: "read raster variables"
+author: "Mike Sigler"
+date: "4/9/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#### read raster variables
+#### project to standard
+#### write to files
+
+### read libraries
+```{r,cache=TRUE,echo=FALSE}
+
+## load libraries
+library(mgcv)
+library(PresenceAbsence)
+library(gbm)
+library(dismo)
+library(raster)
+library(rgdal)
+library(maptools)
+library(gstat)
+library(rgeos)
+library(proj4)
+library(sp)
+library(maptools)
+library(maps)
+library(xtable)
+library(randomForest)
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+library(PerformanceAnalytics)
+library(ggfortify)
+library(lubridate)
+```
+
+### set up  directories
+```{r, cache=TRUE, echo=FALSE}
+#rm(list = ls())
+# set project directories
+data.path     <- "D:\\Documents\\Alaska-Coral-and-Sponge-Model\\Trawl data\\"
+GOArasters.path <- "D:\\Documents\\Alaska-Coral-and-Sponge-Model\\Variables_GOA_100m\\"
+AIrasters.path <- "D:\\Documents\\Alaska-Coral-and-Sponge-Model\\Variables_AI_100m\\"
+EBSrasters.path <- "D:\\Documents\\Alaska-Coral-and-Sponge-Model\\Variables_EBS_100m\\"
+results.path <- "D:\\Documents\\Alaska-Coral-and-Sponge-Model\\Results\\"
+predictionrasters.path <- "D:\\Documents\\Alaska-Coral-and-Sponge-Model\\Results\\PredictionRasters\\"
+projectionrasters.GOA.path <- "D:\\Documents\\Alaska-Coral-and-Sponge-Model\\ProjectionRastersGOA\\"
+projectionrasters.AI.path <- "D:\\Documents\\Alaska-Coral-and-Sponge-Model\\ProjectionRastersAI\\"
+projectionrasters.EBS.path <- "D:\\Documents\\Alaska-Coral-and-Sponge-Model\\ProjectionRastersEBS\\"
+```
+
+### set standard projection
+```{r, cache=TRUE, echo=FALSE}
+
+# set projection
+newproj<-"+proj=aea +lat_1=50 +lat_2=58.5 +lat_0=45 +lon_0=-126 +x_0=1000000 +y_0=0 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs"
+
+areas <- c("AI","EBS","GOA")                                        # number of areas
+```
+
+### Gulf of Alaska
+```{r, cache=TRUE, echo=FALSE}
+variables <- c("goabathy","goaspeed","goabtemp","goacolor","goaslope","tmax")   # raster (variable) names
+nvar <- length(variables)
+path <- projectionrasters.GOA.path
+for (j in 1:nvar) {
+  temp1<-raster(paste(GOArasters.path,variables[j],sep=""))                      # load the raster
+  temp2<-projectRaster(temp1,crs=newproj,progress="text")                        # convert the projection
+    assign(paste(variables[j],sep=""),temp2)          # assign raster name
+}
+# Create lat and lon rasters (needed for predictions)
+ lon <- init(goabathy,v='x')
+ lat <- init(goabathy,v='y')
+
+# resample tmax, to match the extent and layout of the other rasters (otherwise stacking fails)
+tmaxr <- resample(tmax, lon, method='bilinear')   # raster to be modified is followed by the desired raster layout, automatically clips to the desired extent
+# check extents
+extent(goabathy);extent(tmaxr)
+# check that stacking will work
+raster.stack.GOA<-stack(lon,lat,goabathy,goaspeed,goabtemp,goacolor,goaslope,tmaxr) # stack the rasters
+names(raster.stack.GOA) <- c("lon","lat","bathy","speed","btemp","color","slope","tmax")
+plot(raster.stack.GOA)   
+
+# write GOA rasters to files
+writeRaster(lon,filename=paste(path,"lon",sep=""),overwrite=T)
+writeRaster(lat,filename=paste(path,"lat",sep=""),overwrite=T)
+writeRaster(goabathy,filename=paste(path,"bathy",sep=""),overwrite=T)
+writeRaster(goaspeed,filename=paste(path,"speed",sep=""),overwrite=T)
+writeRaster(goabtemp,filename=paste(path,"btemp",sep=""),overwrite=T)
+writeRaster(goacolor,filename=paste(path,"color",sep=""),overwrite=T)
+writeRaster(goaslope,filename=paste(path,"slope",sep=""),overwrite=T)
+writeRaster(tmaxr,filename=paste(path,"tmax",sep=""),overwrite=T)
+```
+
+### Aleutian Islands
+```{r, cache=TRUE, echo=FALSE}
+variables <- c("Bathy","Bcurrent","Btemp","Color","Slope","Tmax")   # raster (variable) names
+nvar <- length(variables)
+path <- projectionrasters.AI.path
+
+for (j in 1:nvar) {
+  temp1<-raster(paste(AIrasters.path,variables[j],sep=""))                      # load the raster
+  temp2<-projectRaster(temp1,crs=newproj,progress="text")                        # convert the projection
+    assign(paste(variables[j],sep=""),temp2)          # assign raster name
+}
+# Create lat and lon rasters (needed for predictions)
+ lon <- init(Bathy,v='x')
+ lat <- init(Bathy,v='y')
+  
+# write AI rasters to files
+writeRaster(lon,filename=paste(path,"lon",sep=""),overwrite=T)
+writeRaster(lat,filename=paste(path,"lat",sep=""),overwrite=T)
+writeRaster(Bathy,filename=paste(path,"bathy",sep=""),overwrite=T)
+writeRaster(Bcurrent,filename=paste(path,"speed",sep=""),overwrite=T)
+writeRaster(Btemp,filename=paste(path,"btemp",sep=""),overwrite=T)
+writeRaster(Color,filename=paste(path,"color",sep=""),overwrite=T)
+writeRaster(Slope,filename=paste(path,"slope",sep=""),overwrite=T)
+writeRaster(Tmax,filename=paste(path,"tmax",sep=""),overwrite=T)
+
+#Chris: Warning message:
+#In showSRID(uprojargs, format = "PROJ", multiline = "NO", prefer_proj = prefer_proj) :
+#  Discarded datum Unknown based on GRS80 ellipsoid in Proj4 definition
+```
+
+### Eastern Bering Sea
+```{r, cache=TRUE, echo=FALSE}
+variables <- c("Bathy2","Speed","Btemp","Color","Slope","tmax")   # raster (variable) names
+nvar <- length(variables)
+path <- projectionrasters.EBS.path
+
+for (j in 1:nvar) {
+  temp1<-raster(paste(EBSrasters.path,variables[j],sep=""))                      # load the raster
+  temp2<-projectRaster(temp1,crs=newproj,progress="text")                        # convert the projection
+    assign(paste(variables[j],sep=""),temp2)          # assign raster name
+}
+# Create lat and lon rasters (needed for predictions)
+ lon <- init(Bathy2,v='x')
+ lat <- init(Bathy2,v='y')
+  
+# check extents, tmax differs so ...
+extent(Bathy2); extent(Speed); extent(Btemp); extent(Color); extent(Slope);extent(tmax) 
+
+# resample tmax, to match the extent and layout of the other rasters (otherwise stacking fails)
+tmaxr <- resample(tmax, lon, method='bilinear')   # raster to be modified is followed by the desired raster layout, automatically clips to the desired extent
+
+# recheck extents ==> now match
+extent(Bathy2);extent(tmaxr)
+# check that stacking will work
+raster.stack.EBS<-stack(lon,lat,Bathy2,Speed,Btemp,Color,Slope,tmaxr) # stack the rasters
+names(raster.stack.EBS) <- c("lon","lat","bathy","speed","btemp","color","slope","tmax")
+plot(raster.stack.EBS)   
+
+# write EBS rasters to files
+writeRaster(lon,filename=paste(path,"lon",sep=""),overwrite=T)
+writeRaster(lat,filename=paste(path,"lat",sep=""),overwrite=T)
+writeRaster(Bathy2,filename=paste(path,"bathy",sep=""),overwrite=T)
+writeRaster(Speed,filename=paste(path,"speed",sep=""),overwrite=T)
+writeRaster(Btemp,filename=paste(path,"btemp",sep=""),overwrite=T)
+writeRaster(Color,filename=paste(path,"color",sep=""),overwrite=T)
+writeRaster(Slope,filename=paste(path,"slope",sep=""),overwrite=T)
+writeRaster(tmaxr,filename=paste(path,"tmax",sep=""),overwrite=T)
+
+removeTmpFiles(h=.25)
+```
