@@ -1,0 +1,803 @@
+---
+title: "read trawl data"
+author: "Mike Sigler"
+date: "4/9/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### read trawl data.Rmd
+#### analyze Gulf of Alaska trawl survey data for deep sea coral and sponge
+
+### read libraries
+```{r,cache=TRUE,echo=FALSE}
+
+## load libraries
+library(mgcv)
+library(PresenceAbsence)
+library(gbm)
+library(dismo)
+library(raster)
+library(rgdal)
+library(maptools)
+library(gstat)
+library(rgeos)
+library(proj4)
+library(sp)
+library(maptools)
+library(maps)
+library(xtable)
+library(randomForest)
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+library(PerformanceAnalytics)
+library(ggfortify)
+library(lubridate)
+```
+
+### set up directories
+```{r, cache=TRUE, echo=FALSE}
+#rm(list = ls())
+# set project directories
+data.path     <- "D:\\Documents\\Alaska-Coral-and-Sponge-Model\\Trawl data\\"
+GOArasters.path <- "D:\\Documents\\Alaska-Coral-and-Sponge-Model\\Variables_GOA_1km\\"
+AIrasters.path <- "D:\\Documents\\Alaska-Coral-and-Sponge-Model\\Variables_AI_1km_1000m\\"
+results.path <- "D:\\Documents\\Alaska-Coral-and-Sponge-Model\\Results\\"
+predictionrasters.path <- "D:\\Documents\\Alaska-Coral-and-Sponge-Model\\Results\\PredictionRasters\\"
+projectionrasters.GOA.path <- "D:\\Documents\\Alaska-Coral-and-Sponge-Model\\ProjectionRastersGOA\\"
+```
+
+### read trawl data
+```{r, cache=TRUE, echo=FALSE}
+# read trawl data
+GOA_data <-as_tibble(read.csv(paste(data.path,"GOA_Trawl_data.csv",sep="")))
+GOA_data$year <- year(mdy_hms(GOA_data$START_TIME))
+
+# some data checks
+# cross tabulate
+GOA_data %>%
+  count(Taxon)   # looks good
+# locations
+GOA_data %>%
+  ggplot(aes(x=START_LONGITUDE)) + geom_histogram()  # looks good
+GOA_data %>%
+  ggplot(aes(x=START_LATITUDE)) + geom_histogram()   # looks good
+GOA_data %>%
+  count(year)   # looks good
+
+# Group data by haul
+# Taxon CPUE
+  GOA_data %>% 
+    group_by(HAULJOIN,Taxon) %>%
+    summarise(sum=sum(CPUE)) %>%   # sum CPUE within Taxon
+    spread(Taxon,sum,fill=0) ->    # "spread" taxon names across table header
+    Taxon.CPUE
+  summary(Taxon.CPUE)
+  nrow(Taxon.CPUE)                 # 11,753 records
+
+# latitude, longitude, etc 
+  GOA_data %>%
+    select(c(HAULJOIN,START_TIME,START_LONGITUDE,START_LATITUDE,BOTTOM_DEPTH,GEAR_TEMPERATURE,year)) %>%
+    distinct() ->                  # choose distinct cases of the selected variables
+    Location
+  nrow(Location)                   # 11,753 camera drops
+
+# match location and Taxon.CPUE data  
+  Location.Taxon <- left_join(Location,Taxon.CPUE,by="HAULJOIN") 
+
+# Add Taxon.presence (presence/absence = 1/0)
+  # first create columns to store values
+  num.records <- nrow(Location.Taxon)
+  Taxon.presence <- as.data.frame(cbind(rep(0,num.records),rep(0,num.records),rep(0,num.records)))
+  colnames(Taxon.presence) <- c("Coral.presence","SeaPenWhip.presence","Sponge.presence")
+  Location.Taxon <- cbind(Location.Taxon[,-11],Taxon.presence)   # bind presence to location and CPUE
+  for (i in 1:num.records) {                                     # determine presence/absence
+    if(Location.Taxon$Coral[i]>0) Location.Taxon$Coral.presence[i] <- 1  
+    if(Location.Taxon$SeaPenWhip[i]>0) Location.Taxon$SeaPenWhip.presence[i] <- 1 
+    if(Location.Taxon$Sponge[i]>0) Location.Taxon$Sponge.presence[i] <- 1 
+  }
+
+# check the data some more
+  summary(Location.Taxon)
+  # 1,918 records with no temperature data
+  # all other fields have data
+# check years without temperature data
+  Location.Taxon %>%
+     filter(is.na(GEAR_TEMPERATURE)) %>%
+    count(year) ->
+    count.temp
+  Location.Taxon %>%
+    count(year) ->
+    count.rec
+  left_join(count.rec,count.temp,by="year")
+# all years have some temperature data but less common for three earliest years (1984, 1987, 1990)
+```
+
+### read the (correctly projected) rasters and then stack them
+```{r, cache=TRUE, echo=FALSE,eval=FALSE}
+
+# set projection
+newproj<-"+proj=aea +lat_1=50 +lat_2=58.5 +lat_0=45 +lon_0=-126 +x_0=1000000 +y_0=0 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs"
+
+# read GOA rasters from files
+  variable.names <-  c("lon","lat","bathy","speed","btemp","color","slope","tmax")
+  nvars <- length(variable.names)
+  for (j in 1:nvars) {
+   temp1<-raster(paste(projectionrasters.GOA.path,variable.names[j],sep=""))  # load the raster
+   assign(paste(variable.names[j]),temp1)                                     # assign raster name
+   }
+  
+raster.stack.GOA<-stack(lon,lat,bathy,speed,btemp,color,slope,tmax) # stack the rasters
+names(raster.stack.GOA) <- variable.names                           # name the rasters 
+plot(raster.stack.GOA)                                              # plot each raster
+```
+
+### match raster layers to the DSCS trawl data
+```{r, cache=TRUE, echo=FALSE}
+# all trawl survey locations, transform to a shape object, check overlay, extract raster values and bind to original data
+Location <- data.frame(lon=Location.Taxon$START_LONGITUDE,lat=Location.Taxon$START_LATITUDE) # select locations
+Location.GOA <- SpatialPoints(Location,proj4string=CRS("+proj=longlat +datum=WGS84"))     # create a list of the points
+Location.GOA.projected <- spTransform(Location.GOA,crs(newproj))                    # add projection
+plot(raster.stack.GOA[[3]])                                                         # plot projection
+plot(Location.GOA.projected,add=TRUE)                                               # check overlay
+GOA.extract<-raster::extract(raster.stack.GOA,Location.GOA.projected)               # extract raster values
+mydata <- cbind(Location.Taxon,GOA.extract)
+nrow(mydata)   # 11,753 records
+
+# check for NA values (values that, for example, lie outside the GOA raster layers)
+mydata %>%
+  filter(is.na(speed)) ->
+  mydata.na
+nrow(mydata.na)   # 853 records
+summary(mydata.na$START_LONGITUDE)
+# Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+# -170.0  -167.9  -166.4  -166.5  -165.5  -132.7
+# most are in western Gulf of Alaska
+
+# remove columns with NA values (for bathy, etc)
+#  the resulting table will be tested against the Aleutians raster layers
+mydata.na %>%
+  select(-c(lon:tmax)) ->
+  test.GOA
+
+# match the Gulf of Alaska NA values to the Aleutians rasters, which extends east of 170 deg W
+Location.testGOA <- data.frame(lon=test.GOA$START_LONGITUDE,lat=test.GOA$START_LATITUDE)  # identify data
+Location.testGOA <- SpatialPoints(Location.testGOA,proj4string=CRS("+proj=longlat +datum=WGS84")) # create a list of the points
+Location.testGOA.projected <- spTransform(Location.testGOA,crs(newproj))    # add projection
+plot(raster.stack.AI[[3]])                                                  # plot projection
+plot(Location.testGOA.projected,add=TRUE)                                   # check overlay
+testGOA.extract<-raster::extract(raster.stack.AI,Location.testGOA.projected)# extract raster values
+Location.DSCS.testGOA<-cbind(test.GOA,testGOA.extract)
+
+Location.DSCS.testGOA %>%
+  filter(is.na(speed)) ->       # check for NA values 
+  test2.GOA
+nrow(Location.DSCS.testGOA)        # 853 records (outside GOA raster)
+nrow(test2.GOA)                    #  59 records ==> some records remain outside AI raster 
+max(test2.GOA$START_LONGITUDE); min(test2.GOA$START_LONGITUDE)    # no obvious rhyme or reason to the excluded points  
+# [1] -132.6795
+# [1] -163.2772
+max(test2.GOA$BOTTOM_DEPTH); min(test2.GOA$BOTTOM_DEPTH)             
+# 787
+# [1] 33
+max(test2.GOA$START_LATITUDE); min(test2.GOA$START_LATITUDE)  
+# [1] 58.116
+# [1] 54.48439
+
+# add indicator for sample locations outside the GOA rasters
+Location.DSCS.testGOA$inside.GOA.raster <- 0
+
+# replace records outside the GOA raster, now with AI information (in most cases), in mydata
+mydata %>%
+  filter(!is.na(speed)) ->       # remove samples outside the GOA raster
+  mydata.revised
+mydata.revised$inside.GOA.raster <- 1  # add indicator for records inside the GOA raster
+nrow(mydata.revised)                # 10,900 records
+nrow(Location.DSCS.testGOA)         # 853 records
+names(mydata.revised)
+names(Location.DSCS.testGOA)
+mydata.revised <- rbind(mydata.revised,Location.DSCS.testGOA) # revised GOA table
+nrow(mydata.revised)                # 11,753 records
+
+mydata.revised %>%
+  filter(is.na(bathy)) ->       # check for remaining NA values, should be 59 records 
+  test2.GOA
+nrow(test2.GOA)                     # 59 records, which matches the number of locations outside both
+                                    #   the AI and GOA rasters
+
+mydata.revised %>%              # and remove those records
+  filter(!is.na(bathy)) ->
+  mydata
+nrow(mydata)                    # 11,694 records
+
+# and last but not least
+# drop records for 1984 and 1987 surveys (Chris questioned the accuracy of the location data)
+mydata %>%
+  filter(year >= 1990) ->
+  mydata
+nrow(mydata)
+# 9,992 records
+# which is the final version of mydata ...
+
+# write final version
+write.csv(mydata,paste(results.path,"Location.DSCS.trawl.csv",sep=""),row.names = FALSE)
+```
+
+
+
+### read the matched data (if you do not make the raster stacks)
+```{r, cache=TRUE, echo=FALSE,eval=FALSE}
+#  if you do not want to rerun all of the previous code, which takes ~2 hours
+#    run the next (commented) step
+  mydata <- read.csv(paste(results.path,"Location.DSCS.trawl.csv",sep=""))
+
+# alternately, restack GOA rasters, which are used for predictions (takes ~3 minutes)
+# set projection
+newproj<-"+proj=aea +lat_1=50 +lat_2=58.5 +lat_0=45 +lon_0=-126 +x_0=1000000 +y_0=0 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs"
+
+# import rasters
+variables <- c("Bathy","Bcurrent","Btemp","Color","Slope","Tmax")   # raster (variable) names
+nvar <- length(variables)                                           # number of variables
+areas <- c("AI","EBS","GOA")                                        # number of areas
+
+# Gulf of Alaska
+for (j in 1:nvar) {
+  temp1<-raster(paste(GOArasters.path,variables[j],sep=""))                      # load the raster
+  temp2<-projectRaster(temp1,crs=newproj,progress="text")                        # convert the projection
+  assign(paste(variables[j],".",areas[3],".","projected",sep=""),temp2)          # assign raster name
+}
+raster.stack.GOA<-stack(Bathy.GOA.projected,Bcurrent.GOA.projected,Btemp.GOA.projected, # stack the rasters
+                       Color.GOA.projected,Slope.GOA.projected,Tmax.GOA.projected)
+names(raster.stack.GOA) <- variables                                             # name the rasters 
+plot(raster.stack.GOA)                                                           # plot each raster
+
+# Create lat and lon rasters (needed for predictions) and stack with other rasters
+ lon.GOA.projected <- init(Bathy.GOA.projected,v='x')
+ lat.GOA.projected<-init(Bathy.GOA.projected,v='y')
+ raster.stack.GOA <- stack(lon.GOA.projected,lat.GOA.projected,raster.stack.GOA)
+ variable.names <-  c("lon","lat","bathy","speed","btemp","color","slope","tmax")
+ names(raster.stack.GOA) <-  variable.names 
+ plot(raster.stack.GOA)
+# should be good to go to complete analyses without having to rerun AI rasters
+```
+
+
+
+### conform the raster and data variable names before running the models
+```{r, cache=TRUE, echo=FALSE}
+# trawl DSCS data
+  mydata %>%
+    select(-bathy) %>%              # drop bathy from raster layer 
+    rename(depth = BOTTOM_DEPTH) -> # and instead use measured depth
+    mydata
+  
+# and change the raster layers names to match
+   names(raster.stack.GOA) <- c("lon","lat","depth","speed","btemp","color","slope","tmax") 
+   plot(raster.stack.GOA)
+```
+
+#### analysis code (GAM, etc) from Chris Rooper
+### separate train and test data sets
+```{r, cache=TRUE, echo=FALSE}
+
+# exclude sample locations outside GOA rasters (necessary for prediction)
+mydata %>%
+  filter(inside.GOA.raster==1) ->
+  mydata
+nrow(mydata)   # 9,318 records 
+summary(mydata)  # 652 NA for gear temperature, which is not used in the calculations
+                 # instead average temperature (btemp) is used in calculations
+
+# generate random uniform variables [0,1]
+num.records <- nrow(mydata)
+random.var <- runif(num.records)
+hist(random.var)   # check random variables, looks good
+length(random.var) # 9,318 records
+
+# append to mydata
+mydata <- cbind(mydata,random.var)
+
+# fraction of samples allocated to training set
+frac.test <- 0.8
+mydata %>%
+  filter(random.var <= frac.test) ->
+  train
+mydata %>%
+  filter(random.var > frac.test) ->
+  test
+nrow(train)+nrow(test)   # check split, adds up to 9,318 ...
+
+# choose non-zero values
+train %>% 
+  filter(Coral.presence==1) ->
+  trainc
+test %>% 
+  filter(Coral.presence==1) ->
+  testc 
+```
+
+
+### METHOD 1 - DELTA GAM (GAM FOR PRESENCE-ABSENCE, SET THRESHOLD, GAM FOR POSITIVE OCCURRENCES
+```{r, cache=TRUE, echo=FALSE}
+#fullmodel
+# use Chris's names
+ train$corals_present <- train$Coral.presence
+ test$corals_present <- test$Coral.presence
+ 
+# notes on variables:
+#   use trawl survey depth (depth)
+#   use temperature from raster (long-term average) (btemp)
+# here is the presence-absence GAM
+ 
+corals.DG.pa<-gam(corals_present~s(lon)+s(lat)+s(depth,k=4)+s(btemp,k=4)+s(tmax,k=4)+s(speed,k=4)+s(slope,k=4)+s(color,k=4),data=train,family=binomial)
+summary(corals.DG.pa)
+# slope and color are not statistically significant
+
+#reduced model (drop non-significant variables)
+corals.DG.pa<-gam(corals_present~s(lon)+s(lat)+s(depth,k=4)+s(btemp,k=4)+s(tmax,k=4)+s(speed,k=4),data=train,family=binomial)
+summary(corals.DG.pa)
+gam.check(corals.DG.pa)
+#plot(corals.DG.pa)
+
+#test the predictions on the training data
+train_predict<-predict.gam(corals.DG.pa,train,type="response")
+train.auc_data<-data.frame(cbind(seq(1,length(train_predict),1),train[,"corals_present"],train_predict))
+
+#Calculate the AUC
+auc(train.auc_data,na.rm=TRUE)
+
+#Estimate the thresholds and calculate diagnostics
+# subset for values (i.e., remove NA)
+optimal.thresholds(train.auc_data,opt.methods=c(seq(1:9)))
+train.threshold<-optimal.thresholds(train.auc_data,opt.methods=6)
+train.threshold<-train.threshold[,2]
+auc.roc.plot(train.auc_data,opt.methods=c(seq(1:9)))
+calibration.plot(train.auc_data,N.bins=10)
+error.threshold.plot(train.auc_data,opt.methods=c(seq(1:9)),opt.thresholds=TRUE)
+cmx(train.auc_data,threshold=train.threshold)   # observed 1 often predicted as 0
+pcc(cmx(train.auc_data,threshold=train.threshold))
+sensitivity(cmx(train.auc_data,threshold=train.threshold))
+specificity(cmx(train.auc_data,threshold=train.threshold))
+predicted.prevalence(train.auc_data,threshold=train.threshold)
+presence.absence.accuracy(train.auc_data,threshold=train.threshold)
+presence.absence.hist(train.auc_data,color=c("green","red"),truncate.tallest=TRUE)
+presence.absence.summary(train.auc_data,opt.methods=c(2,4,5),N.bins=10,truncate.tallest=TRUE)
+cor.test(train.auc_data[,2],train.auc_data[,3],method="spearman")
+
+#test the predictions on the test data
+test_predict<-predict.gam(corals.DG.pa,test,type="response")
+test.auc_data<-data.frame(cbind(seq(1,length(test_predict),1),test[,"corals_present"],test_predict))
+
+#Calculate the AUC
+auc(test.auc_data,na.rm=TRUE)
+
+#Estimate the thresholds and calculate diagnostics
+auc.roc.plot(test.auc_data,opt.methods=c(seq(1:9)))
+calibration.plot(test.auc_data,N.bins=10)
+error.threshold.plot(test.auc_data,opt.methods=c(seq(1:9)),opt.thresholds=TRUE)
+cmx(test.auc_data,threshold=train.threshold)
+pcc(cmx(test.auc_data,threshold=train.threshold))
+sensitivity(cmx(test.auc_data,threshold=train.threshold))
+specificity(cmx(test.auc_data,threshold=train.threshold))
+predicted.prevalence(test.auc_data,threshold=train.threshold)
+presence.absence.accuracy(test.auc_data,threshold=train.threshold)
+presence.absence.hist(test.auc_data,color=c("green","red"),truncate.tallest=TRUE)
+presence.absence.summary(test.auc_data,opt.methods=c(2,4,5),N.bins=10,truncate.tallest=TRUE)
+cor.test(test.auc_data[,2],test.auc_data[,3],method="spearman")
+
+corals.DG.pa.raster<-predict(raster.stack.GOA, corals.DG.pa,filename=paste(predictionrasters.path,"coralsGAMpa",sep=""),fun=predict, na.rm=TRUE,overwrite=TRUE,progress="text",type="response",newdata.guaranteed=TRUE)
+plot(corals.DG.pa.raster,main="Coral Generalized Additive Model - PA")
+plot(akland,col=1,add=TRUE)
+plot(canada_land,col=1,add=TRUE)
+# Chris, drop this next line, right? (related to dropped code in GAM section)
+#corals.presence.mask<-mask(corals.DG.pa.raster,corals.habitat.mask)
+#writeRaster(corals.presence.mask,filename=paste(predictionrasters.path,"coralsGAMpa",sep=""),overwrite=TRUE)
+```
+
+
+### GAM model
+```{r, cache=TRUE, echo=FALSE}
+############GAM Models for Coral abundance
+# change variable names to match code
+
+ trainc$Coral_generic <- trainc$Coral
+ testc$Coral_generic <- testc$Coral
+
+#fullmodel
+ # there was an error here, which Chris diagnosed
+corals.DG.cpue<-gam((Coral_generic)^.25~s(lon)+s(lat)+s(depth,k=4)+s(btemp,k=4)+s(tmax,k=4)+s(speed,k=4)+s(slope,k=4)+s(color,k=4),data=trainc,family=gaussian)
+summary(corals.DG.cpue)
+
+#reduced model
+corals.DG.cpue<-gam((Coral_generic)^.25~s(lon)+s(lat)+s(depth,k=4)+s(btemp,k=4),data=trainc,family=gaussian)
+colnames(train)
+summary(corals.DG.cpue)
+gam.check(corals.DG.cpue)
+#plot(corals.DG.cpue,scale=0,residuals=TRUE)
+
+#test the predictions on the training data
+observed.train<-(trainc$Coral_generic)^.25
+predicted.train<-predict(corals.DG.cpue,trainc,type="response")
+pred.train<-lm(observed.train~predicted.train)
+summary(pred.train)
+plot(observed.train,predicted.train)
+abline(pred.train)
+
+#test the predictions on the test data
+observed.test<-(testc$Coral_generic)^.25
+predicted.test<-predict(corals.DG.cpue,testc,type="response")
+pred.test<-lm(observed.test~predicted.test)
+summary(pred.test)
+plot(observed.test,predicted.test)
+abline(pred.test)
+
+# make a prediction raster
+# probability of presence (GLM 0/1) and abundance raster
+corals.DG.cpue.raster<-predict(raster.stack.GOA, corals.DG.cpue,filename=paste(predictionrasters.path,"coralsGAMcpue",sep=""),fun=predict, na.rm=TRUE,overwrite=TRUE,progress="text",type="response",newdata.guaranteed=TRUE)
+
+plot(corals.DG.cpue.raster, main="Coral GAM - PA, GAM for CPUE, Threshold = 0.05")
+plot(akland,col=1,add=TRUE)
+plot(canada_land,col=1,add=TRUE)
+
+#####OVERALL R2 GAM######
+### the correction is here
+#train.observed<-(train$Coral_generic)^0.25
+train.observed<-(train$Coral)^0.25
+length(train.observed)
+train.predicted<-predict(corals.DG.pa,train,type="response")
+train.predicted[train.predicted>=train.threshold]<-1
+train.predicted[train.predicted<train.threshold]<-0
+train.predicted.cpue<-predict(corals.DG.cpue,train,type="response")
+train.predicted.cpue<-train.predicted.cpue*train.predicted
+# Chris: fails here (occurs later too ... ) (not any more)
+pred.train<-lm(train.predicted.cpue~train.observed)
+summary(pred.train)
+plot(train.observed,train.predicted.cpue)
+abline(pred.train)
+mse_coral<-sum(pred.train$residuals^2)/pred.train$df.residual
+mse_coral
+
+test.observed<-(test$Coral)^0.25
+test.predicted<-predict(corals.DG.pa,test,type="response")
+test.predicted[test.predicted>=train.threshold]<-1
+test.predicted[test.predicted<train.threshold]<-0
+test.predicted.cpue<-predict(corals.DG.cpue,test,type="response")
+test.predicted.cpue<-test.predicted.cpue*test.predicted
+# Chris, fails here
+pred.test<-lm(test.predicted.cpue~test.observed)
+summary(pred.test)
+plot(test.observed,test.predicted.cpue)
+abline(pred.test)
+mse_coral<-sum(pred.test$residuals^2)/pred.test$df.residual
+mse_coral
+```
+
+
+### METHOD 2 - Boosted Regression Tree
+```{r, cache=TRUE, echo=FALSE}
+####BRT PRESENCE ABSENCE MODEL######################################
+# Chris, the next step fails (I revised the selected columns)
+corals.BRT.pa<-gbm.step(data=train, gbm.x = c(5,14:20), gbm.y = 11, family = "bernoulli", tree.complexity = 5,learning.rate = 0.005, bag.fraction = 0.5)
+gbm.plot(corals.BRT.pa)
+gbm.plot.fits(corals.BRT.pa)
+summary(corals.BRT.pa)
+
+#test the predictions on the training data
+train_predict<-predict.gbm(corals.BRT.pa,train, n.trees=corals.BRT.pa$gbm.call$best.trees, type="response")
+train.auc_data<-data.frame(cbind(seq(1,length(train_predict),1),train[,"corals_present"],train_predict))
+
+#Calculate the AUC
+auc(train.auc_data,na.rm=TRUE)
+
+#Estimate the thresholds and calculate diagnostics
+optimal.thresholds(train.auc_data,opt.methods=c(seq(1:9)))
+train.threshold<-optimal.thresholds(train.auc_data,opt.methods=2)
+train.threshold<-train.threshold[,2]
+auc.roc.plot(train.auc_data,opt.methods=c(seq(1:9)))
+calibration.plot(train.auc_data,N.bins=10)
+error.threshold.plot(train.auc_data,opt.methods=c(seq(1:9)),opt.thresholds=TRUE)
+cmx(train.auc_data,threshold=train.threshold)
+pcc(cmx(train.auc_data,threshold=train.threshold))
+sensitivity(cmx(train.auc_data,threshold=train.threshold))
+specificity(cmx(train.auc_data,threshold=train.threshold))
+predicted.prevalence(train.auc_data,threshold=train.threshold)
+presence.absence.accuracy(train.auc_data,threshold=train.threshold)
+presence.absence.hist(train.auc_data,color=c("green","red"),truncate.tallest=TRUE)
+presence.absence.summary(train.auc_data,opt.methods=c(2,4,5),N.bins=10,truncate.tallest=TRUE)
+cor.test(train.auc_data[,2],train.auc_data[,3])
+
+#test the predictions on the test data
+test_predict<-predict.gbm(corals.BRT.pa,test, n.trees=corals.BRT.pa$gbm.call$best.trees, type="response")
+test.auc_data<-data.frame(cbind(seq(1,length(test_predict),1),test[,"corals_present"],test_predict))
+
+#Calculate the AUC
+auc(test.auc_data,na.rm=TRUE)
+
+#Estimate the thresholds and calculate diagnostics
+auc.roc.plot(test.auc_data,opt.methods=c(seq(1:9)))
+calibration.plot(test.auc_data,N.bins=10)
+error.threshold.plot(test.auc_data,opt.methods=c(seq(1:9)),opt.thresholds=TRUE)
+cmx(test.auc_data,threshold=train.threshold)
+pcc(cmx(test.auc_data,threshold=train.threshold))
+sensitivity(cmx(test.auc_data,threshold=train.threshold))
+specificity(cmx(test.auc_data,threshold=train.threshold))
+predicted.prevalence(test.auc_data,threshold=train.threshold)
+presence.absence.accuracy(test.auc_data,threshold=train.threshold)
+presence.absence.hist(test.auc_data,color=c("green","red"),truncate.tallest=TRUE)
+presence.absence.summary(test.auc_data,opt.methods=c(2,4,5),N.bins=10,truncate.tallest=TRUE)
+cor.test(test.auc_data[,2],test.auc_data[,3])
+
+
+
+#Predict to Raster
+corals.BRT.pa.raster<-predict(raster.stack.GOA, corals.BRT.pa, n.trees=corals.BRT.pa$gbm.call$best.trees, type="response",filename=paste(predictionrasters.path,"coralsBRTpa",sep=""), na.rm=TRUE,overwrite=TRUE,progress="text",newdata.guaranteed=TRUE)
+plot(corals.BRT.pa.raster,main="Coral Boosted Regression Tree - PA")
+plot(akland,col=1,add=TRUE)
+plot(canada_land,col=1,add=TRUE)
+
+#############BRT Models for Coral abundance
+train$corals.fourth<-(train$Coral_generic)^0.25
+test$corals.fourth<-(test$Coral_generic)^0.25
+corals.BRT<-gbm.step(data=train, gbm.x = c(8,29:30,32,34:36,38), gbm.y = 40, family = "gaussian", tree.complexity = 5,learning.rate = 0.01, bag.fraction = 0.5)
+gbm.plot(corals.BRT)
+gbm.plot.fits(corals.BRT)
+summary(corals.BRT)
+
+#Test on training data
+train_predict<-predict.gbm(corals.BRT,train, n.trees=corals.BRT$gbm.call$best.trees, type="response")
+plot(train_predict~train$corals.fourth)
+brt.pred.train<-lm(train_predict~train$corals.fourth)
+summary(brt.pred.train)
+abline(brt.pred.train)
+mse_coral<-sum(brt.pred.train$residuals^2)/brt.pred.train$df.residual
+mse_coral
+
+#Test on test data
+test_predict<-predict.gbm(corals.BRT,test, n.trees=corals.BRT$gbm.call$best.trees, type="response")
+plot(test_predict~test$corals.fourth)
+brt.pred.test<-lm(test_predict~test$corals.fourth)
+summary(brt.pred.test)
+abline(brt.pred.test)
+mse_coral<-sum(brt.pred.test$residuals^2)/brt.pred.test$df.residual
+mse_coral
+
+#Predict to Raster
+corals.BRT.cpue.raster<-predict(GOA.stack, corals.BRT, n.trees=corals.BRT$gbm.call$best.trees, type="response",filename="U:/GOA Coral and Sponge Model/Results/PredictionRasters/coralsBRTcpue", na.rm=TRUE,overwrite=TRUE,progress="text",newdata.guaranteed=TRUE)
+corals.BRT.cpue.raster<-mask(corals.BRT.cpue.raster,corals.habitat.mask,overwrite=TRUE)
+writeRaster(corals.BRT.cpue.raster,filename="U:/GOA Coral and Sponge Model/Results/PredictionRasters/coralsBRTcpue",overwrite=TRUE)
+plot(corals.BRT.cpue.raster,main="Coral Boosted Regression Tree - PA")
+plot(akland,col=1,add=TRUE)
+plot(canada_land,col=1,add=TRUE)
+```
+
+
+### METHOD 3 - DELTA GLM METHOD
+```{r, cache=TRUE, echo=FALSE}
+#fullmodel
+corals.GLM.pa<-glm(corals_present~lon+lat+depth+btemp+slope+tmax+speed+color+I(lon^2)++I(lat^2)+I(depth^2)+I(slope^2)+I(btemp^2)+I(tmax^2)+I(speed^2)+I(color^2),data=train,family=binomial)
+summary(corals.GLM.pa)
+
+#reduced model
+corals.GLM.pa<-glm(corals_present~lon+lat+btemp+tmax+speed+color+I(lon^2)++I(lat^2)+I(speed^2)+I(color^2),data=train,family=binomial)
+summary(corals.GLM.pa)
+#plot(corals.GLM.pa)
+
+#test the predictions on the training data
+train_predict<-predict.glm(corals.GLM.pa,train,type="response")
+train.auc_data<-data.frame(cbind(seq(1,length(train_predict),1),train[,"corals_present"],train_predict))
+
+#Calculate the AUC
+auc(train.auc_data,na.rm=TRUE)
+
+#Estimate the thresholds and calculate diagnostics
+optimal.thresholds(train.auc_data,opt.methods=c(seq(1:9)))
+train.threshold<-optimal.thresholds(train.auc_data,opt.methods=6)
+train.threshold<-train.threshold[,2]
+auc.roc.plot(train.auc_data,opt.methods=c(seq(1:9)))
+calibration.plot(train.auc_data,N.bins=10)
+error.threshold.plot(train.auc_data,opt.methods=c(seq(1:9)),opt.thresholds=TRUE)
+cmx(train.auc_data,threshold=train.threshold)
+pcc(cmx(train.auc_data,threshold=train.threshold))
+sensitivity(cmx(train.auc_data,threshold=train.threshold))
+specificity(cmx(train.auc_data,threshold=train.threshold))
+predicted.prevalence(train.auc_data,threshold=train.threshold)
+presence.absence.accuracy(train.auc_data,threshold=train.threshold)
+presence.absence.hist(train.auc_data,color=c("green","red"),truncate.tallest=TRUE)
+presence.absence.summary(train.auc_data,opt.methods=c(2,4,5),N.bins=10,truncate.tallest=TRUE)
+cor.test(train.auc_data[,2],train.auc_data[,3],method="spearman")
+
+#test the predictions on the test data
+test_predict<-predict.glm(corals.GLM.pa,test,type="response")
+test.auc_data<-data.frame(cbind(seq(1,length(test_predict),1),test[,"corals_present"],test_predict))
+
+#Calculate the AUC
+auc(test.auc_data,na.rm=TRUE)
+
+#Estimate the thresholds and calculate diagnostics
+auc.roc.plot(test.auc_data,opt.methods=c(seq(1:9)))
+calibration.plot(test.auc_data,N.bins=10)
+error.threshold.plot(test.auc_data,opt.methods=c(seq(1:9)),opt.thresholds=TRUE)
+cmx(test.auc_data,threshold=train.threshold)
+pcc(cmx(test.auc_data,threshold=train.threshold))
+sensitivity(cmx(test.auc_data,threshold=train.threshold))
+specificity(cmx(test.auc_data,threshold=train.threshold))
+predicted.prevalence(test.auc_data,threshold=train.threshold)
+presence.absence.accuracy(test.auc_data,threshold=train.threshold)
+presence.absence.hist(test.auc_data,color=c("green","red"),truncate.tallest=TRUE)
+presence.absence.summary(test.auc_data,opt.methods=c(2,4,5),N.bins=10,truncate.tallest=TRUE)
+cor.test(test.auc_data[,2],test.auc_data[,3])
+
+corals.GLM.pa.raster<-predict(raster.stack.GOA, corals.GLM.pa,filename=paste(predictionrasters.path,"coralsGLMpa",sep=""),fun=predict, na.rm=TRUE,overwrite=TRUE,progress="text",type="response",newdata.guaranteed=TRUE)
+plot(corals.GLM.pa.raster,main="Coral Generalized Linear Model - PA")
+plot(akland,col=1,add=TRUE)
+plot(canada_land,col=1,add=TRUE)
+
+#############GLM Models for Coral abundance
+#fullmodel
+corals.GLM.cpue<-glm((Coral_generic)^.25~lon+lat+depth+btemp+slope+tmax+speed+color+I(lon^2)+I(lat^2)+I(depth^2)+I(slope^2)+I(btemp^2)+I(tmax^2)+I(speed^2)+I(color^2),data=trainc,family=gaussian)
+summary(corals.GLM.cpue)
+
+#reduced model
+#fullmodel
+corals.GLM.cpue<-glm((Coral_generic)^.25~lon+lat+depth+btemp+slope+color+I(lat^2)+I(btemp^2)+I(color^2),data=trainc,family=gaussian)
+summary(corals.GLM.cpue)
+#plot(corals.GLM.cpue,scale=0,residuals=TRUE)
+
+#test the predictions on the training data
+observed.train.GLM<-(trainc$Coral_generic)^.25
+predicted.train.GLM<-predict(corals.GLM.cpue,trainc,type="response")
+pred.train.GLM<-lm(observed.train.GLM~predicted.train.GLM)
+summary(pred.train.GLM)
+plot(observed.train.GLM,predicted.train.GLM)
+abline(pred.train.GLM)
+
+#test the predictions on the test data
+observed.test.GLM<-(testc$Coral_generic)^.25
+predicted.test.GLM<-predict(corals.GLM.cpue,testc,type="response")
+pred.test.GLM<-lm(observed.test.GLM~predicted.test.GLM)
+summary(pred.test.GLM)
+plot(observed.test.GLM,predicted.test.GLM)
+abline(pred.test.GLM)
+
+temp_raster<-cut(corals.GLM.pa.raster,breaks=c(train.threshold,1))
+corals.GLM.cpue.raster<-predict(raster.stack.GOA, corals.GLM.cpue,filename=paste(predictionrasters.path,"coralsGLMcpue",sep=""),fun=predict, na.rm=TRUE,overwrite=TRUE,progress="text",type="response",newdata.guaranteed=TRUE)
+
+corals.GLM.cpue.raster<-mask(corals.GLM.cpue.raster,temp_raster)
+writeRaster(corals.GLM.cpue.raster,filename=paste(predictionrasters.path,"coralsGLMcpue",sep=""),overwrite=TRUE)
+plot(corals.GLM.cpue.raster, main="Coral GAM - PA, GAM for CPUE, Threshold = 0.05")
+plot(akland,col=1,add=TRUE)
+plot(canada_land,col=1,add=TRUE)
+
+#####OVERALL R2 GLM######
+train.observed<-(train$Coral)^0.25
+train.predicted<-predict(corals.GLM.pa,train,type="response")
+train.predicted[train.predicted>=train.threshold]<-1
+train.predicted[train.predicted<train.threshold]<-0
+train.predicted.cpue<-predict(corals.GLM.cpue,train,type="response")
+train.predicted.cpue<-train.predicted.cpue*train.predicted
+# Chris: same fail as earlier
+pred.train<-lm(train.predicted.cpue~train.observed)
+summary(pred.train)
+plot(train.observed,train.predicted.cpue)
+abline(pred.train)
+mse_coral<-sum(pred.train$residuals^2)/pred.train$df.residual
+mse_coral
+
+test.observed<-(test$Coral)^0.25
+test.predicted<-predict(corals.GLM.pa,test,type="response")
+test.predicted[test.predicted>=train.threshold]<-1
+test.predicted[test.predicted<train.threshold]<-0
+test.predicted.cpue<-predict(corals.GLM.cpue,test,type="response")
+test.predicted.cpue<-test.predicted.cpue*test.predicted
+pred.test<-lm(test.predicted.cpue~test.observed)
+summary(pred.test)
+plot(test.observed,test.predicted.cpue)
+abline(pred.test)
+mse_coral<-sum(pred.test$residuals^2)/pred.test$df.residual
+mse_coral
+```
+
+
+### METHOD 4 - RANDOM FOREST METHOD
+```{r, cache=TRUE, echo=FALSE}
+corals.RF.pa<-randomForest(as.factor(corals_present)~lat+lon+depth+slope+btemp+speed+tmax+color,data=train, ntree=1000,importance=TRUE, na.action=na.omit)
+print(corals.RF.pa)
+round(importance(corals.RF.pa), 2)
+
+train_predict_RF<-predict(corals.RF.pa,train,type="prob")[,2]
+train.auc_data<-data.frame(cbind(seq(1,length(train_predict_RF),1),train[,"corals_present"],train_predict_RF))
+
+#Calculate the AUC
+auc(train.auc_data,na.rm=TRUE)
+
+#Estimate the thresholds and calculate diagnostics
+optimal.thresholds(train.auc_data,opt.methods=c(seq(1:9)))
+train.threshold<-optimal.thresholds(train.auc_data,opt.methods=2)
+train.threshold<-train.threshold[,2]
+auc.roc.plot(train.auc_data,opt.methods=c(seq(1:9)))
+calibration.plot(train.auc_data,N.bins=10)
+error.threshold.plot(train.auc_data,opt.methods=c(seq(1:9)),opt.thresholds=TRUE)
+cmx(train.auc_data,threshold=train.threshold)
+pcc(cmx(train.auc_data,threshold=train.threshold))
+sensitivity(cmx(train.auc_data,threshold=train.threshold))
+specificity(cmx(train.auc_data,threshold=train.threshold))
+predicted.prevalence(train.auc_data,threshold=train.threshold)
+presence.absence.accuracy(train.auc_data,threshold=train.threshold)
+presence.absence.hist(train.auc_data,color=c("green","red"),truncate.tallest=TRUE)
+presence.absence.summary(train.auc_data,opt.methods=c(2,4,5),N.bins=10,truncate.tallest=TRUE)
+cor.test(train.auc_data[,2],train.auc_data[,3])
+
+
+#Test on test data
+test_predict_RF<-predict(corals.RF.pa,test,type="prob")[,2]
+test.auc_data<-data.frame(cbind(seq(1,length(test_predict_RF),1),test[,"corals_present"],test_predict_RF))
+
+#Calculate the AUC
+auc(test.auc_data,na.rm=TRUE)
+
+#Estimate the thresholds and calculate diagnostics
+auc.roc.plot(test.auc_data,opt.methods=c(seq(1:9)))
+calibration.plot(test.auc_data,N.bins=10)
+error.threshold.plot(test.auc_data,opt.methods=c(seq(1:9)),opt.thresholds=TRUE)
+cmx(test.auc_data,threshold=train.threshold)
+pcc(cmx(test.auc_data,threshold=train.threshold))
+sensitivity(cmx(test.auc_data,threshold=train.threshold))
+specificity(cmx(test.auc_data,threshold=train.threshold))
+predicted.prevalence(test.auc_data,threshold=train.threshold)
+presence.absence.accuracy(test.auc_data,threshold=train.threshold)
+presence.absence.hist(test.auc_data,color=c("green","red"),truncate.tallest=TRUE)  # random forest overfits the data
+presence.absence.summary(test.auc_data,opt.methods=c(2,4,5),N.bins=10,truncate.tallest=TRUE)
+cor.test(test.auc_data[,2],test.auc_data[,3])
+
+
+#Predict to Raster
+corals.RF.pa.raster<-predict(raster.stack.GOA, corals.RF.pa,type="prob",filename=paste(predictionrasters.path,"coralsRFpa",sep=""), na.rm=TRUE,overwrite=TRUE,progress="text",newdata.guaranteed=TRUE)
+plot(1-corals.RF.pa.raster,main="Coral Boosted Regression Tree - PA")   # was the probability of the zero category
+plot(akland,col=1,add=TRUE)
+plot(canada_land,col=1,add=TRUE)
+
+#####RF CPUE MODEL
+# no need to do the following
+# Chris, is the correct transform?
+ train$corals.fourth <- train$Coral^(1/4)
+ test$corals.fourth <- test$Coral^(1/4)
+
+corals.RF<-randomForest(corals.fourth~lat+lon+depth+slope+btemp+speed+tmax+color,data=train, ntree=1000,importance=TRUE, na.action=na.omit)
+print(corals.RF)
+round(importance(corals.RF), 2)
+
+#Test on training data
+train_predict_RF<-predict(corals.RF,train,type="response")
+plot(train_predict_RF~train$corals.fourth)
+RF.pred.train<-lm(train_predict_RF~train$corals.fourth)
+summary(RF.pred.train)
+abline(RF.pred.train)
+mse_coral<-sum(RF.pred.train$residuals^2)/RF.pred.train$df.residual
+mse_coral
+
+#Test on test data
+test_predict_RF<-predict(corals.RF,test,type="response")
+plot(test_predict_RF~test$corals.fourth)
+RF.pred.test<-lm(test_predict_RF~test$corals.fourth)
+summary(RF.pred.test)
+abline(RF.pred.test)
+mse_coral<-sum(RF.pred.test$residuals^2)/RF.pred.test$df.residual
+mse_coral
+
+#Predict to Raster
+corals.RF.cpue.raster<-predict(raster.stack.GOA, corals.RF,type="response",filename=paste(predictionrasters.path,"coralsRFcpue",sep=""), na.rm=TRUE,overwrite=TRUE,progress="text",newdata.guaranteed=TRUE)
+#corals.RF.cpue.raster<-mask(corals.RF.cpue.raster,corals.habitat.mask,overwrite=TRUE)
+#writeRaster(corals.RF.cpue.raster,filename=paste(predictionrasters.path,"coralsRFcpue",sep=""),overwrite=TRUE)
+plot(corals.RF.cpue.raster,main="Coral Boosted Regression Tree - PA")
+plot(akland,col=1,add=TRUE)
+plot(canada_land,col=1,add=TRUE)
+
+removeTmpFiles(h=.25)
+
+```
+
