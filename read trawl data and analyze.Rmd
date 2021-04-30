@@ -135,6 +135,13 @@ newproj<-"+proj=aea +lat_1=50 +lat_2=58.5 +lat_0=45 +lon_0=-126 +x_0=1000000 +y_
 raster.stack.GOA<-stack(lon,lat,bathy,speed,btemp,color,slope,tmax) # stack the rasters
 names(raster.stack.GOA) <- variable.names                           # name the rasters 
 plot(raster.stack.GOA)
+# plot individually
+plot(bathy)
+plot(speed)
+plot(btemp)
+plot(color)
+plot(slope)
+plot(tmax)  # tmax is high outside Dixon Entrance and may account for the high inferred coral probability in the absence of any trawl survey samples
 ```
 
 ### match raster layers to the DSCS trawl data
@@ -675,8 +682,8 @@ coralsRFpa <- 1 - coralsRFpa
 
 compareRaster(coralsBRTpa,coralsGAMpa,coralsGLMpa,coralsRFpa)
 
-raster.stack.pa<-stack(coralsBRTpa,coralsGAMpa,coralsGLMpa,coralsRFpa) # stack the rasters
-names(raster.stack.pa) <- c("BRT","GAM","GLM","RF")                           # name the rasters 
+raster.stack.pa<-stack(coralsGAMpa,coralsGLMpa,coralsBRTpa,coralsRFpa) # stack the rasters
+names(raster.stack.pa) <- c("GAM","GLM","BRT","RF")                           # name the rasters 
 plot(raster.stack.pa)
 
 # compute, plot and write to a file the mean probability of presence
